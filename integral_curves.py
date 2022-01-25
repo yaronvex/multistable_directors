@@ -9,14 +9,30 @@ NUM_FRUSTA = 78
 MIN_LENGTH = 80.  # mm
 MAX_LENGTH = 415.  # mm
 MIN_RAD = 55.  # mm
+DEF_MAX_RAD = MIN_RAD * 1.5
+DEF_NUM_CURVES = 6
 FRUSTUM_DEFORM = (MAX_LENGTH - MIN_LENGTH) / NUM_FRUSTA
 
 SAVE_DIR = Path(__file__).parent / 'results'
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
+DEF_RTOL = 1e-8
+DEF_ATOL = 1e-8
+DEF_NUM_EVAL_POINTS = 100
+# number of variables to integrate - angle of spiral,
+# angle of conjugate spiral, and spiral arc-length.
+Y_LEN = 3
+# Indexes of the variables in the solution vector:
+THETA_IDX = 0
+CONJ_IDX = 1
+LENGTH_IDX = 2
+# Intersection marker color and transparency
+INTERSECT_COLOR = (.5, .5, .5, .8)
+
 
 def integral_curve(alpha_func, ri, rf, theta_i,
-                   num_eval_points=50, args=None, events=None):
+                   num_eval_points=DEF_NUM_EVAL_POINTS, args=None,
+                   events=None):
     """Compute integral curve of spiral
 
     Args:
@@ -26,7 +42,8 @@ def integral_curve(alpha_func, ri, rf, theta_i,
         rf (float): Final radius of spiral.
         theta_i (float): Initial angle from x axis to spiral
         num_eval_points (int, optional): Number of evaluation points of the
-                                         spiral curve. Defaults to 50.
+                                         spiral curve. Defaults to
+                                         DEF_NUM_EVAL_POINTS.
         args (tuple, optional): Additional arguments for alpha function.
         events (function or list, optional): Event functions
 
@@ -37,13 +54,13 @@ def integral_curve(alpha_func, ri, rf, theta_i,
     """
     r_span = (ri, rf)
     r_eval = np.linspace(ri, rf, num_eval_points)
-    sol = solve_ivp(d_theta, r_span, np.array(theta_i), t_eval=r_eval,
-                    args=(alpha_func, *args), rtol=1e-8, atol=1e-8,
+    sol = solve_ivp(calc_dy, r_span, np.array(theta_i), t_eval=r_eval,
+                    args=(alpha_func, *args), rtol=DEF_RTOL, atol=DEF_ATOL,
                     vectorized=True, events=events,
                     # max_step=1e-4,
                     )
     r: np.ndarray = sol.t
-    theta: np.ndarray = sol.y[:2]
+    theta: np.ndarray = sol.y[[THETA_IDX, CONJ_IDX]]
     x: np.ndarray = r * np.cos(theta)
     y: np.ndarray = r * np.sin(theta)
     r_events: np.ndarray = sol.t_events
@@ -51,50 +68,57 @@ def integral_curve(alpha_func, ri, rf, theta_i,
     return x, y, r_events, y_events
 
 
-def d_theta(r, theta, alpha_func, *args):
+def calc_dy(r, theta, alpha_func, *args):
     """Calculate the derivative of the angle of a spiral
     defined by the spiral angle function for a given radius
 
     Args:
-        r (float or ndarray): Radius of the spiral point
+        r (float or ndarray): Radius of the spiral point of shape (N, )
         theta (list, ndarray): Angles of the spiral point and the
                                conjugate spiral point
         alpha_func (function): Spiral angle function
         args (list): additional arguments for alpha_func
 
     Returns:
-        ndarray: The derivative of the spiral and the conjugate
-                 spiral at the given points.
+        ndarray: The derivatives of the spiral angle, the conjugate
+                 spiral angle, and the spiral arc-length at the given points.
     """
-    d_y = np.zeros((3, len([r]))) if len([r]) > 1 else np.zeros((3, ))
+    if type(r) is not np.ndarray:
+        r = np.array([r])
+
+    d_y = np.zeros((Y_LEN, len(r)))
     alpha = alpha_func(r, theta, *args)
-    d_y[:2] = np.tan([alpha, alpha - np.pi/2]) / r
-    d_y[2] = 1 / np.cos(alpha)
+    d_y[[THETA_IDX, CONJ_IDX]] = np.tan([alpha, alpha - np.pi/2]) / r
+    d_y[LENGTH_IDX] = 1 / np.cos(alpha)
     return d_y
 
 
-def intersection(r, theta, *args, th2_0):
+def intersection(r, y, *args, th2_0):
     """Find angle difference between two curves in polar coordinates.
     Event function for finding intersections
 
     Args:
         r (float): Radius at which to calculate the angle difference
-        theta (list, ndarray): Angles of the two curves
+        y (list, ndarray): Current solution vector containing the
+                           angles of the two curves.
         th2_0 (float): Starting angle of the second curve
 
     Returns:
         float: Angle difference between curves at given point, normalized
                so it will change signs at each intersection of the curves.
     """
-    delta_theta = theta[0] - (theta[1] + th2_0)
+    theta_1 = y[THETA_IDX]
+    theta_2 = y[CONJ_IDX] + th2_0
+    delta_theta = theta_1 - theta_2
     delta_theta = (-1)**(np.abs(delta_theta)//(2*np.pi)) *\
         np.fmod(delta_theta, 2*np.pi)
     return delta_theta
 
 
-def compute_axisymmetric_integral_curves(alpha_func, ri=0, rf=1,
-                                         num_eval_points=None, args=None,
-                                         num_of_curves=4, ax=None,
+def compute_axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
+                                         rf=DEF_MAX_RAD, num_eval_points=None,
+                                         args=None,
+                                         num_of_curves=DEF_NUM_CURVES, ax=None,
                                          draw_conj=False):
     """Calculate and draw axisymmetric integral curves for a given spiral angle
     function. Calculate conjugate integral curves that intersect the original
@@ -103,14 +127,14 @@ def compute_axisymmetric_integral_curves(alpha_func, ri=0, rf=1,
 
     Args:
         alpha_func (function): Spiral angle function
-        ri (float, optional): Initial radius. Defaults to 0.
-        rf (float, optional): Final radius. Defaults to 1.
+        ri (float, optional): Initial radius. Defaults to MIN_RAD.
+        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
         num_eval_points (int, optional): Number of evaluation points for each
                                          spiral curve. Defaults to None.
         args (list or tuple, optional): Additional arguments for alpha_func.
                                         Defaults to None.
         num_of_curves (int, optional): Number of spiral curves to draw.
-                                       Defaults to 4.
+                                       Defaults to DEF_NUM_CURVES.
         ax (axis object, optional): matplotlib axis object. Defaults to None.
         draw_conj (bool, optional): Flag to draw the conjugate curves.
                                     Defaults to False.
@@ -118,48 +142,92 @@ def compute_axisymmetric_integral_curves(alpha_func, ri=0, rf=1,
     Returns:
         tuple: Figure and axis objects
     """
+    # Calculate integral spiral curve assuming starting angle of 0
     theta_vec, curve_0_x, curve_0_y, r_events, y_events =\
         compute_zero_angle_integral_curve(
             alpha_func, ri, rf, num_eval_points, args, num_of_curves)
-
+    spiral_x, conj_x = curve_0_x
+    spiral_y, conj_y = curve_0_y
+    # Calculate x,y coordinates of intersections between conjugate spiral
+    # curves and the 0 starting angle curve
     intersections, s_events = process_intersections(r_events, y_events)
-    curve_data = calc_curve_data(curve_0_x[0], curve_0_y[0], theta_vec)
-    conj_data = calc_curve_data(curve_0_x[1], curve_0_y[1], theta_vec)
+    intersect_x, intersect_y = intersections
+    # Calculate data of all rotated curves
+    curve_data = calc_curve_data(spiral_x, spiral_y, theta_vec)
+    conj_data = calc_curve_data(conj_x, conj_y, theta_vec)
     intersection_data = calc_curve_data(
-        intersections[0], intersections[1], theta_vec)\
+        intersect_x, intersect_y, theta_vec)\
 
+    # Create dataframes from spirals, conjugate spirals, and intersections
     curve_df = create_dataframe(curve_data, 'straw')
     conj_df = create_dataframe(conj_data, name='conj_curve')
     intersection_df = create_dataframe(intersection_data,
                                        name='fixed_points_straw')
+    intersection_df['arc_length'] = s_events
+    col_at_start = ['arc_length']
+    intersection_df = intersection_df[[c for c in col_at_start] +
+                                      [c for c in intersection_df
+                                       if c not in col_at_start]]
+    # Save dataframes to csv files
     curve_df.to_csv(str(SAVE_DIR / 'straw_curves.csv'))
     conj_df.to_csv(str(SAVE_DIR / 'conjugate_curves.csv'))
     intersection_df.to_csv(str(SAVE_DIR / 'fixed_points_straw.csv'))
-
+    # Draw spirals, conjugate spirals, and intersections
     fig, ax = draw_curve_rotations(curve_data)
     if draw_conj:
         fig, ax = draw_curve_rotations(conj_data, fig=fig, ax=ax, color='red')
 
     fig, ax = draw_curve_rotations(intersection_data, fig=fig, ax=ax,
-                                   color=(.5, .5, .5, .8), marker='o',
+                                   color=INTERSECT_COLOR, marker='o',
                                    linestyle='')
+    # Save figure to file
     fig.savefig(str(SAVE_DIR / 'director_figure.png'))
     return fig, ax, s_events
 
 
-def compute_zero_angle_integral_curve(alpha_func, ri=0, rf=1,
+def compute_zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
                                       num_eval_points=None, args=None,
-                                      num_of_curves=4):
+                                      num_of_curves=DEF_NUM_CURVES):
+    """Compute an integral spiral curve starting and angle theta = 0
+
+    Args:
+        alpha_func (function): Spiral angle function
+        ri (float, optional): Initial radius. Defaults to MIN_RAD.
+        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
+        num_eval_points (int, optional): Number of evaluation points for each
+                                         spiral curve. Defaults to None.
+        args (list or tuple, optional): Additional arguments for alpha_func.
+                                        Defaults to None.
+        num_of_curves (int, optional): Number of spiral curves to draw.
+                                       Defaults to DEF_NUM_CURVES.
+
+    Returns:
+        tuple: Tuple of:
+            ndarray: Vector of starting angles of curves.
+                     Shape: (num_of_curves, )
+            ndarray: Spiral and conj. spiral x values.
+                     Shape: (2, num_eval_points)
+            ndarray: Spiral and conj. spiral y values.
+                     Shape: (2, num_eval_points)
+            list: List of intersection radii between the spiral and all
+                  conjugate spirals.
+            list: List of intersection angle and arc-lengths between the
+                  spiral and all conjugate spirals.
+    """
+    # Compute vector of starting angle values
     if num_of_curves == 1:
         theta_vec = np.array([0])
     else:
         theta_vec = np.linspace(0, 2*np.pi, num_of_curves+1)[:-1]
+    # Create a list of intersection event functions for each conjugate spiral
     events = [
-        lambda t, y, *args, th2_0=th2_0: (
-            intersection(t, y, *args, th2_0=th2_0)) for th2_0 in theta_vec]
+        lambda r, y, *args, th2_0=th2_0: (
+            intersection(r, y, *args, th2_0=th2_0)) for th2_0 in theta_vec]
+    # Compute integral curves and intersections
     sol = integral_curve(
         alpha_func, ri, rf, [0, 0, 0], num_eval_points, args=args,
         events=events)
+    # Extract solution
     curve_0_x, curve_0_y, r_events, y_events = sol
     return theta_vec, curve_0_x, curve_0_y, r_events, y_events
 
@@ -177,6 +245,7 @@ def process_intersections(r_events, y_events):
         ndarray: Cartesian coordinate intersections on shape
                  (2, number of intersections)
     """
+    # Find all valid intersections
     y_valid = []
     r_valid = []
     for y_event, r_event in zip(y_events, r_events):
@@ -184,11 +253,10 @@ def process_intersections(r_events, y_events):
             r_valid.append(r_event)
             y_valid.append(y_event)
 
-    # print(f'{y_events[valid] = }')
     r_event_vec = np.concatenate(r_valid).reshape(1, -1)
-    y_event_vec = np.concatenate(y_valid).reshape(-1, 3).T
-    theta_event_vec = y_event_vec[0]
-    s_events = np.sort(y_event_vec[2])
+    y_event_vec = np.concatenate(y_valid).reshape(-1, Y_LEN).T
+    theta_event_vec = y_event_vec[THETA_IDX]
+    s_events = np.sort(y_event_vec[LENGTH_IDX])
     x_event = r_event_vec * np.cos(theta_event_vec)
     y_event = r_event_vec * np.sin(theta_event_vec)
     return np.concatenate([x_event, y_event], axis=0), s_events
@@ -272,34 +340,34 @@ def alpha_const(r, theta, alpha):
     return alpha * np.ones_like(r)
 
 
-def alpha_const_curvature(r, theta, K, deform):
+def alpha_const_curvature(r, theta, gauss_curv, deform):
     """Compute the constant Gaussian curvature spiral angle
 
     Args:
         r (float or ndarray): radius of spiral
         theta (float or ndarray): Angle of spiral point
-        K (float): Gaussian curvature of deformed surface
+        gauss_curv (float): Gaussian curvature of deformed surface
         deform (float): Axial deformation of directors
 
     Returns:
         ndarray: Spiral angle values
     """
-    c_k, c, _ = const_curvature_director_params(K, deform)
+    c_k, c, _ = const_curvature_director_params(gauss_curv, deform)
     return 0.5 * np.arccos(-0.5 * c_k * r**2 + c)
 
 
-def const_curvature_director_params(K, deform):
+def const_curvature_director_params(gauss_curv, deform):
     """Calculate parameters for constant curvature spiral angle function
 
     Args:
-        K (float): Gaussian curvature of deformed surface
+        gauss_curv (float): Gaussian curvature of deformed surface
         deform (float): Axial deformation of directors
 
     Returns:
         tuple: parameters for constant curvature spiral angle function,
                and the maximal allowed radius of the spiral.
     """
-    c_k = -K / (1 - deform**(-2))
+    c_k = -gauss_curv / (1 - deform**(-2))
     c = (1 - 2 / (1 + deform))
     rf_max = np.sqrt(2 * (1 - c) / -c_k)
     return c_k, c, rf_max
@@ -310,15 +378,15 @@ if __name__ == '__main__':
     ri = MIN_RAD
     alpha_func = alpha_const_curvature
     sphere_rad = 183  # mm
-    K = 1/(sphere_rad**2)
+    gauss_curv = 1/(sphere_rad**2)
     # deform = 2
     num_connections = 8  # Change this iteratively
     min_length = MIN_LENGTH + num_connections * FRUSTUM_DEFORM
     print(f'{min_length = } mm')
     deform = MAX_LENGTH / min_length
     print(f'Deformation = {deform}')
-    args = (K, deform)
-    _, _, rf_max = const_curvature_director_params(K, deform)
+    args = (gauss_curv, deform)
+    _, _, rf_max = const_curvature_director_params(gauss_curv, deform)
     rf = (1 - 1e-6)*rf_max
     num_of_curves = 12
     # alpha_func = alpha_const
