@@ -193,7 +193,7 @@ def compute_axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
             intersect_r, intersect_theta, args, conj_ratio)
         # Plot links and connection points
         fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
-        
+
     # Save figure to file
     fig.savefig(str(SAVE_DIR / 'director_figure.png'))
     return fig, ax, s_events, link_len
