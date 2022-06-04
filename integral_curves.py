@@ -13,7 +13,11 @@ MIN_RAD = 55.  # mm
 DEF_MAX_RAD = MIN_RAD * 1.5
 DEF_NUM_CURVES = 6
 FRUSTUM_DEFORM = (MAX_LENGTH - MIN_LENGTH) / NUM_FRUSTA
+FRUSTUM_STATIC_LEN = (MAX_LENGTH + MIN_LENGTH) / (2*NUM_FRUSTA)
+FRUSTUM_DYNAMIC_LEN = (MAX_LENGTH - MIN_LENGTH) / (2*NUM_FRUSTA)
 CONNECTOR_LENGTH = 28/2
+LINK_BALL_DIAM = 3.25  # mm
+MIN_LINK_LENGTH = LINK_BALL_DIAM * 2
 
 SAVE_DIR = Path(__file__).parent / 'results'
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -21,8 +25,8 @@ DEF_CURVE_DATA_FILENAME = 'straw_curves'
 DEF_CONJ_CURVE_DATA_FILENAME = 'conjugate_curves'
 DEF_INTERSECTION_DATA_FILENAME = 'fixed_points_straw'
 
-DRAW_CONJ = False
-DRAW_INTERSECTIONS = False
+DRAW_CONJ = True
+DRAW_INTERSECTIONS = True
 
 DEF_RTOL = 1e-8
 DEF_ATOL = 1e-8
@@ -101,7 +105,7 @@ def calc_dy(r, theta, alpha_func, *args):
     return d_y
 
 
-def intersection(r, y, *args, th2_0):
+def intersection_event(r, y, *args, th2_0):
     """Find angle difference between two curves in polar coordinates.
     Event function for finding intersections
 
@@ -121,6 +125,23 @@ def intersection(r, y, *args, th2_0):
     delta_theta = (-1)**(np.abs(delta_theta)//(2*np.pi)) *\
         np.fmod(delta_theta, 2*np.pi)
     return delta_theta
+
+
+def arc_len_event(r, y, *args, arc_len):
+    """Find arc-length difference between curve and given arc-length.
+    Use as an event function to find points of length 's' along integral curve.
+
+    Args:
+        r (float): Radius at which to calculate the angle difference
+        y (list, ndarray): Current solution vector containing the
+                           angles and length of the current integral curve.
+        arc_len (float): Desired arc-length value.
+
+    Returns:
+        float: Arc-length difference between the integral curve and the desired arc-length
+    """
+    arc_len_integral = y[LENGTH_IDX]
+    return arc_len - arc_len_integral
 
 
 def axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
@@ -163,7 +184,7 @@ def axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
     spiral_y, conj_y = curve_0_y
     # Calculate x,y coordinates of intersections between conjugate spiral
     # curves and the 0 starting angle curve
-    intersections, s_events, intersect_r, intersect_theta = events2intersections(r_events, y_events)
+    intersections, s_events, intersect_r, intersect_theta = events2points(r_events, y_events)
     intersect_x, intersect_y = intersections
     # Calculate data of all rotated curves
     curve_data = rot_curves(spiral_x, spiral_y, theta_vec)
@@ -214,7 +235,7 @@ def zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
     intersect_theta_vec = np.linspace(0, 2*np.pi, num_of_conj+1)[:-1]
     events = [
         lambda r, y, *args, th2_0=th2_0: (
-            intersection(r, y, *args, th2_0=th2_0)) for th2_0 in intersect_theta_vec]
+            intersection_event(r, y, *args, th2_0=th2_0)) for th2_0 in intersect_theta_vec]
     # Compute integral curves and intersections
     sol = integral_curve(
         alpha_func, ri, rf, [0, 0, 0], num_eval_points, args=args,
@@ -224,21 +245,18 @@ def zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
     return theta_vec, intersect_theta_vec, curve_0_x, curve_0_y, r_events, y_events
 
 
-def events2intersections(r_events, y_events):
-    """Compute (x,y) coordinates of intersection points
+def events2points(r_events, y_events):
+    """Compute (x,y) coordinates of event points along integral curve
 
     Args:
-        r_events (list of ndarrays): List of radius values of intersections
-                                     between a spiral curve and all conjugate
-                                     spiral curves
-        y_events (list of ndarrays): List of angle values of intersections
+        r_events (list of ndarrays): List of radius values of events
+        y_events (list of ndarrays): List of angle values of events
 
     Returns:
-        ndarray: Cartesian coordinate intersections on shape
-                 (2, number of intersections)
-        ndarray: Vector of arc-length locations of intersections along the curve.
-        ndarray: Vector of r-coordinate values of the intersections.
-        ndarray: Vector of theta-coordinate values of the intersections.
+        ndarray: Cartesian coordinate events of shape (2, number of events)
+        ndarray: Vector of arc-length locations of events along the curve.
+        ndarray: Vector of r-coordinate values of the events.
+        ndarray: Vector of theta-coordinate values of the events.
     """
     # Find all valid intersections
     y_valid = []
@@ -254,8 +272,8 @@ def events2intersections(r_events, y_events):
     s_events = np.sort(y_event_vec[LENGTH_IDX])
     x_event = r_event_vec * np.cos(theta_event_vec)
     y_event = r_event_vec * np.sin(theta_event_vec)
-    intersections = np.concatenate([x_event, y_event], axis=0)
-    return intersections, s_events, r_event_vec, theta_event_vec
+    xy_events = np.concatenate([x_event, y_event], axis=0)
+    return xy_events, s_events, r_event_vec, theta_event_vec
 
 
 def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarray):
@@ -280,8 +298,8 @@ def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarr
 
 
 def place_connectors(connect_len: float,
-                     theta_vec: np.ndarray,
                      alpha_func,
+                     theta_vec: np.ndarray,
                      ri: float,
                      rf: float,
                      s_events: np.ndarray,
@@ -291,28 +309,6 @@ def place_connectors(connect_len: float,
                      min_link_len: float,
                      args: list = None,
                      conj_ratio: int = 1,):
-    # Compute the best locations for the connectors using the following scheme:
-    # s_new[i-1] + n_theory[i]*(l_static-l_dyn) + (l_static+l_dyn) = s[i]
-    # n_theory[i] = (s[i] - s_new[i-1] - (l_static+l_dyn))/(l_static-l_dyn)
-    # n_minus[i] = floor(n_theory[i])
-    # n_plus[i] = ceil(n_theory[i])
-    # if n_plus[i] or n_minus[i] are <= 0, disregard them
-    # if n_plus[i] or n_minus[i] are >= num_elements, disregard them
-    # otherwise, choose the n that minimizes the error:
-    # err_minus[i] = abs(s[i] - (s_new[i-1] + n_minus[i]*(l_static-l_dyn) + (l_static+l_dyn)))
-    # err_plus[i] = abs(s[i] - (s_new[i-1] + n_plus[i]*(l_static-l_dyn) + (l_static+l_dyn)))
-    # s_new[i] = s_new[i-1] + n_best[i]*(l_static-l_dyn) + (l_static+l_dyn)
-
-    # After computing all s_new, find their exact location using event functions.
-
-    # Using the (x,y) and (r,theta) of the new connector locations,
-    # compute the link lengths.
-
-    # If any link lengths are < min_link_len, repeat the above computation
-    # without the connectors which result in links that are too short.
-
-    # Repeat this until all links are of feasible length, and return the result:
-    # s_new, x_new, y_new, r_new, theta_new
     converge = False
     approx_arc_len = s_events
     while not converge:
@@ -323,9 +319,9 @@ def place_connectors(connect_len: float,
         for s in approx_arc_len:
             n_theory = (s - s_new_last - (l_static+l_dyn))/(l_static-l_dyn)
             n_minus, n_plus = np.floor(n_theory), np.ceil(n_theory)
-            if n_plus <= 0 or n_minus >= num_elements:
-                return
-            elif n_minus <= 0:
+            if n_plus < 0 or n_minus >= num_elements:
+                continue
+            elif n_minus < 0:
                 n_best = n_plus
             elif n_plus >= num_elements:
                 n_best = n_minus
@@ -337,23 +333,38 @@ def place_connectors(connect_len: float,
             s_new_last = s_new_last + n_best*(l_static-l_dyn) + (l_static+l_dyn)
             s_new.append(s_new_last)
             n_new.append(n_best)
-        # TODO: Find new connector locations
+        # Find new connector locations
         x_connect, y_connect, r_connect, theta_connect = \
             integral_curve_arc_length_locations(alpha_func, ri, rf, s_new, args)
         # Compute link lengths
         links, link_len, connect_left, connect_right = compute_links(
             connect_len, alpha_func, theta_vec, x_connect, y_connect,
             r_connect, theta_connect, args, conj_ratio)
-        # TODO: Filter unfeasible links
+        # Filter unfeasible links
+        link_len_0 = link_len[0]
+        if any(link_len_0 < min_link_len):
+            short_link_idx = np.arange(len(link_len_0))[link_len_0 < min_link_len]
+            approx_arc_len = np.delete(approx_arc_len, short_link_idx)
+        else:
+            converge = True
+
+    return links, link_len, connect_left, connect_right, s_new, n_new
 
 
-def integral_curve_arc_length_locations(alpha_func, ri, rf, arc_len, args=None):
-    # TODO
-    x_vec = np.array([])
-    y_vec = np.array([])
-    r_vec = np.array([])
-    theta_vec = np.array([])
-    return x_vec, y_vec, r_vec, theta_vec
+def integral_curve_arc_length_locations(alpha_func, ri, rf, arc_len_list, args=None):
+    if type(arc_len_list) is not list:
+        arc_len_list = [arc_len_list]
+    # Create arc-length events
+    events = [lambda r, y, *args, arc_len=arc_len: (
+            arc_len_event(r, y, *args, arc_len=arc_len)) for arc_len in arc_len_list]
+    # Compute integral curves and intersections
+    sol = integral_curve(alpha_func, ri, rf, [0, 0, 0], num_eval_points,
+                         args=args, events=events)
+    # Extract event solution
+    _, _, r_events, y_events = sol
+    xy_loc, _, r_loc, theta_loc = events2points(r_events, y_events)
+    x_loc, y_loc = xy_loc
+    return x_loc, y_loc, r_loc, theta_loc
 
 
 def compute_links(connect_len: float,
@@ -441,6 +452,19 @@ def draw_links(connect_left: np.ndarray,
                links: np.ndarray,
                fig=None, ax=None,
                conj_ratio: int = 1):
+    """Draw links and connectors
+
+    Args:
+        connect_left (np.ndarray): Vector of left side connector points
+        connect_right (np.ndarray): Vector of right side connector points
+        links (np.ndarray): link data
+        fig (_type_, optional): Figure to draw on. Defaults to None.
+        ax (_type_, optional): Axes to draw on. Defaults to None.
+        conj_ratio (int, optional): Number of conjugate curves per integral curves. Defaults to 1.
+
+    Returns:
+        Tuple[Figure, Axes]: Resultant Figure and Axes objects.
+    """
     if ax is None:
         plt.ion()
         fig, ax = plt.subplots()
@@ -457,6 +481,9 @@ def draw_links(connect_left: np.ndarray,
             linestyle='',
             marker='*',
             color='k')
+    # Draw connector lines
+    for left, right in zip(connect_left.reshape(-1, 2), connect_right.reshape(-1, 2)):
+        ax.plot([left[0], right[0]], [left[1], right[1]], color='k')
     # Draw links
     link_x1 = connect_right[:, :-conj_ratio, 0]
     link_y1 = connect_right[:, :-conj_ratio, 1]
@@ -571,12 +598,12 @@ def save_integral_curve_data(curve_data: np.ndarray,
 
 
 def draw_integral_curves(curve_data: np.ndarray,
-                             conj_data: np.ndarray = None,
-                             intersection_data: np.ndarray = None,
-                             draw_conj: bool = True,
-                             draw_intersections: bool = True,
-                             fig=None,
-                             ax=None):
+                         conj_data: np.ndarray = None,
+                         intersection_data: np.ndarray = None,
+                         draw_conj: bool = True,
+                         draw_intersections: bool = True,
+                         fig=None,
+                         ax=None):
     """Draw integral curves, conjugate integral curves, and intersection points between them
 
     Args:
@@ -676,6 +703,8 @@ if __name__ == '__main__':
     # args = [alpha]
     # rf = 1
     # num_of_curves = 3
+
+    # Compute integral curve data
     curve_data, conj_data, intersection_data, s_events, theta_vec, \
         intersect_x, intersect_y, intersect_r, intersect_theta = axisymmetric_integral_curves(
             alpha_func,
@@ -685,22 +714,30 @@ if __name__ == '__main__':
             args=args,
             conj_ratio=conj_ratio,
             num_of_curves=num_of_curves)
-    save_integral_curve_data(curve_data, conj_data, intersection_data, s_events)
-    fig, ax = draw_integral_curves(curve_data, conj_data, intersection_data, DRAW_CONJ, DRAW_INTERSECTIONS)
     # Compute links and connection points
-    links, link_len, connect_left, connect_right = compute_links(
-        connect_len, alpha_func, theta_vec, intersect_x, intersect_y,
-        intersect_r, intersect_theta, args, conj_ratio)
-    # TODO: Find best placement for intersections given frustum lengths.
-    # TODO: Use the minimum link length to disregard unfeasible connector locations.
-    # TODO: Links could be computed at this stage to filter unfeasible connectors.
-    # Plot links and connection points
+    # links, link_len, connect_left, connect_right = compute_links(
+    #     connect_len, alpha_func, theta_vec, intersect_x, intersect_y,
+    #     intersect_r, intersect_theta, args, conj_ratio)
+    links, link_len, connect_left, connect_right, s_new, n_new = place_connectors(
+        connect_len, alpha_func, theta_vec, ri, rf, s_events, NUM_FRUSTA,
+        FRUSTUM_STATIC_LEN, FRUSTUM_DYNAMIC_LEN, MIN_LINK_LENGTH, args, conj_ratio)
+    # Save data
+    save_integral_curve_data(curve_data, conj_data, intersection_data, s_events)
+    # Draw integral curves
+    fig, ax = draw_integral_curves(curve_data, conj_data, intersection_data,
+                                   DRAW_CONJ, DRAW_INTERSECTIONS)
+    # Draw links and connection points
     fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
     # Save figure to file
-    fig.savefig(str(SAVE_DIR / 'director_figure.png'))
+    fig.savefig(str(SAVE_DIR / 'director_figure.pdf'))
 
     np.set_printoptions(precision=1)
+    print(f'{FRUSTUM_STATIC_LEN = }')
+    print(f'{FRUSTUM_DYNAMIC_LEN = }')
     print(f'{s_events = }')
+    s_new = np.array(s_new)
+    print(f'{s_new = }')
+    print(f'{n_new = }')
     if np.any(link_len):
         print(f'link lengths: {link_len[0]}')
     plt.show(block=True)
