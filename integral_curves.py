@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
-from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
 from pathlib import Path
+from typing import Tuple
 
 
 NUM_FRUSTA = 78
@@ -16,6 +17,12 @@ CONNECTOR_LENGTH = 28/2
 
 SAVE_DIR = Path(__file__).parent / 'results'
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+DEF_CURVE_DATA_FILENAME = 'straw_curves'
+DEF_CONJ_CURVE_DATA_FILENAME = 'conjugate_curves'
+DEF_INTERSECTION_DATA_FILENAME = 'fixed_points_straw'
+
+DRAW_CONJ = False
+DRAW_INTERSECTIONS = False
 
 DEF_RTOL = 1e-8
 DEF_ATOL = 1e-8
@@ -116,14 +123,11 @@ def intersection(r, y, *args, th2_0):
     return delta_theta
 
 
-def compute_axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
-                                         rf=DEF_MAX_RAD, num_eval_points=None,
-                                         args=None,
-                                         num_of_curves: int = DEF_NUM_CURVES,
-                                         conj_ratio: int = DEF_NUM_CURVES,
-                                         connect_len=0,
-                                         ax=None,
-                                         draw_conj=False):
+def axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
+                                 rf=DEF_MAX_RAD, num_eval_points=None,
+                                 args=None,
+                                 num_of_curves: int = DEF_NUM_CURVES,
+                                 conj_ratio: int = DEF_NUM_CURVES):
     """Calculate and draw axisymmetric integral curves for a given spiral angle
     function. Calculate conjugate integral curves that intersect the original
     curves at a 90 degree angle. Calculate the intersection points between the
@@ -139,70 +143,41 @@ def compute_axisymmetric_integral_curves(alpha_func, ri=MIN_RAD,
                                         Defaults to None.
         num_of_curves (int, optional): Number of spiral curves to draw.
                                        Defaults to DEF_NUM_CURVES.
-        ax (axis object, optional): matplotlib axis object. Defaults to None.
-        draw_conj (bool, optional): Flag to draw the conjugate curves.
-                                    Defaults to False.
 
     Returns:
-        tuple: Figure and axis objects
+        np.ndarray: Data of integral curves.
+        np.ndarray: Data of conjugate integral curves.
+        np.ndarray: Data of intersection points between curves and conjugate curves.
+        np.ndarray: Arc-length values of intersection points along the integral curve.
+        np.ndarray: Vector of start angle values of integral curves.
+        np.ndarray: Vector of x-axis value of intersection points on a theta_start=0 integral curve.
+        np.ndarray: Vector of y-axis value of intersection points on a theta_start=0 integral curve.
+        np.ndarray: Vector of r-axis value of intersection points on a theta_start=0 integral curve.
+        np.ndarray: Vector of theta-axis value of intersection points on a theta_start=0 integral curve.
     """
     # Calculate integral spiral curve assuming starting angle of 0
     theta_vec, intersect_theta_vec, curve_0_x, curve_0_y, r_events, y_events =\
-        compute_zero_angle_integral_curve(
-            alpha_func, ri, rf, num_eval_points, args, num_of_curves,
-            conj_ratio)
+        zero_angle_integral_curve(
+            alpha_func, ri, rf, num_eval_points, args, num_of_curves, conj_ratio)
     spiral_x, conj_x = curve_0_x
     spiral_y, conj_y = curve_0_y
     # Calculate x,y coordinates of intersections between conjugate spiral
     # curves and the 0 starting angle curve
-    intersections, s_events, intersect_r, intersect_theta = process_intersections(r_events, y_events)
+    intersections, s_events, intersect_r, intersect_theta = events2intersections(r_events, y_events)
     intersect_x, intersect_y = intersections
     # Calculate data of all rotated curves
-    curve_data = calc_curve_data(spiral_x, spiral_y, theta_vec)
-    conj_data = calc_curve_data(conj_x, conj_y, intersect_theta_vec)
-    intersection_data = calc_curve_data(intersect_x, intersect_y, theta_vec)
+    curve_data = rot_curves(spiral_x, spiral_y, theta_vec)
+    conj_data = rot_curves(conj_x, conj_y, intersect_theta_vec)
+    intersection_data = rot_curves(intersect_x, intersect_y, theta_vec)
 
-    # Create dataframes from spirals, conjugate spirals, and intersections
-    curve_df = create_dataframe(curve_data, 'straw')
-    conj_df = create_dataframe(conj_data, name='conj_curve')
-    intersection_df = create_dataframe(intersection_data,
-                                       name='fixed_points_straw')
-    intersection_df['arc_length'] = s_events
-    col_at_start = ['arc_length']
-    intersection_df = intersection_df[[c for c in col_at_start] +
-                                      [c for c in intersection_df
-                                       if c not in col_at_start]]
-    # Save dataframes to csv files
-    curve_df.to_csv(str(SAVE_DIR / 'straw_curves.csv'))
-    conj_df.to_csv(str(SAVE_DIR / 'conjugate_curves.csv'))
-    intersection_df.to_csv(str(SAVE_DIR / 'fixed_points_straw.csv'))
-    # Draw spirals, conjugate spirals, and intersections
-    fig, ax = draw_curve_rotations(curve_data)
-    if draw_conj:
-        fig, ax = draw_curve_rotations(conj_data, fig=fig, ax=ax, color='red', linestyle='--')
-
-    fig, ax = draw_curve_rotations(intersection_data, fig=fig, ax=ax,
-                                   color=INTERSECT_COLOR, marker='o',
-                                   linestyle='')
-    # Links
-    link_len = []
-    if connect_len:
-        # Compute links and connection points
-        links, link_len, connect_left, connect_right = compute_links(
-            connect_len, alpha_func, theta_vec, intersect_x, intersect_y,
-            intersect_r, intersect_theta, args, conj_ratio)
-        # Plot links and connection points
-        fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
-
-    # Save figure to file
-    fig.savefig(str(SAVE_DIR / 'director_figure.png'))
-    return fig, ax, s_events, link_len
+    return curve_data, conj_data, intersection_data, s_events, theta_vec, \
+        intersect_x, intersect_y, intersect_r, intersect_theta
 
 
-def compute_zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
-                                      num_eval_points=None, args=None,
-                                      num_of_curves=DEF_NUM_CURVES,
-                                      conj_ratio: int=DEF_NUM_CURVES):
+def zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
+                              num_eval_points=None, args=None,
+                              num_of_curves=DEF_NUM_CURVES,
+                              conj_ratio: int=DEF_NUM_CURVES):
     """Compute an integral spiral curve starting and angle theta = 0
 
     Args:
@@ -249,7 +224,7 @@ def compute_zero_angle_integral_curve(alpha_func, ri=MIN_RAD, rf=DEF_MAX_RAD,
     return theta_vec, intersect_theta_vec, curve_0_x, curve_0_y, r_events, y_events
 
 
-def process_intersections(r_events, y_events):
+def events2intersections(r_events, y_events):
     """Compute (x,y) coordinates of intersection points
 
     Args:
@@ -261,6 +236,9 @@ def process_intersections(r_events, y_events):
     Returns:
         ndarray: Cartesian coordinate intersections on shape
                  (2, number of intersections)
+        ndarray: Vector of arc-length locations of intersections along the curve.
+        ndarray: Vector of r-coordinate values of the intersections.
+        ndarray: Vector of theta-coordinate values of the intersections.
     """
     # Find all valid intersections
     y_valid = []
@@ -280,7 +258,7 @@ def process_intersections(r_events, y_events):
     return intersections, s_events, r_event_vec, theta_event_vec
 
 
-def calc_curve_data(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarray):
+def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarray):
     """Calculate curve data for rotated curves.
 
     Args:
@@ -299,6 +277,83 @@ def calc_curve_data(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.
     rot_mat = np.moveaxis(rot_mat, -1, 0)
     curve_data: np.ndarray = rot_mat @ curve_0
     return curve_data
+
+
+def place_connectors(connect_len: float,
+                     theta_vec: np.ndarray,
+                     alpha_func,
+                     ri: float,
+                     rf: float,
+                     s_events: np.ndarray,
+                     num_elements: int,
+                     l_static: float,
+                     l_dyn: float,
+                     min_link_len: float,
+                     args: list = None,
+                     conj_ratio: int = 1,):
+    # Compute the best locations for the connectors using the following scheme:
+    # s_new[i-1] + n_theory[i]*(l_static-l_dyn) + (l_static+l_dyn) = s[i]
+    # n_theory[i] = (s[i] - s_new[i-1] - (l_static+l_dyn))/(l_static-l_dyn)
+    # n_minus[i] = floor(n_theory[i])
+    # n_plus[i] = ceil(n_theory[i])
+    # if n_plus[i] or n_minus[i] are <= 0, disregard them
+    # if n_plus[i] or n_minus[i] are >= num_elements, disregard them
+    # otherwise, choose the n that minimizes the error:
+    # err_minus[i] = abs(s[i] - (s_new[i-1] + n_minus[i]*(l_static-l_dyn) + (l_static+l_dyn)))
+    # err_plus[i] = abs(s[i] - (s_new[i-1] + n_plus[i]*(l_static-l_dyn) + (l_static+l_dyn)))
+    # s_new[i] = s_new[i-1] + n_best[i]*(l_static-l_dyn) + (l_static+l_dyn)
+
+    # After computing all s_new, find their exact location using event functions.
+
+    # Using the (x,y) and (r,theta) of the new connector locations,
+    # compute the link lengths.
+
+    # If any link lengths are < min_link_len, repeat the above computation
+    # without the connectors which result in links that are too short.
+
+    # Repeat this until all links are of feasible length, and return the result:
+    # s_new, x_new, y_new, r_new, theta_new
+    converge = False
+    approx_arc_len = s_events
+    while not converge:
+        # Compute the best locations for the connectors
+        s_new = []
+        n_new = []
+        s_new_last = 0
+        for s in approx_arc_len:
+            n_theory = (s - s_new_last - (l_static+l_dyn))/(l_static-l_dyn)
+            n_minus, n_plus = np.floor(n_theory), np.ceil(n_theory)
+            if n_plus <= 0 or n_minus >= num_elements:
+                return
+            elif n_minus <= 0:
+                n_best = n_plus
+            elif n_plus >= num_elements:
+                n_best = n_minus
+            else:
+                n_list = [n_minus, n_plus]
+                err = [np.abs(s - (s_new_last + n*(l_static-l_dyn) + (l_static+l_dyn))) for n in n_list]
+                n_best = n_list[np.argmin(err)]
+
+            s_new_last = s_new_last + n_best*(l_static-l_dyn) + (l_static+l_dyn)
+            s_new.append(s_new_last)
+            n_new.append(n_best)
+        # TODO: Find new connector locations
+        x_connect, y_connect, r_connect, theta_connect = \
+            integral_curve_arc_length_locations(alpha_func, ri, rf, s_new, args)
+        # Compute link lengths
+        links, link_len, connect_left, connect_right = compute_links(
+            connect_len, alpha_func, theta_vec, x_connect, y_connect,
+            r_connect, theta_connect, args, conj_ratio)
+        # TODO: Filter unfeasible links
+
+
+def integral_curve_arc_length_locations(alpha_func, ri, rf, arc_len, args=None):
+    # TODO
+    x_vec = np.array([])
+    y_vec = np.array([])
+    r_vec = np.array([])
+    theta_vec = np.array([])
+    return x_vec, y_vec, r_vec, theta_vec
 
 
 def compute_links(connect_len: float,
@@ -344,10 +399,11 @@ def compute_links(connect_len: float,
     # prepare data
     # (x,y) coordinates of all intersection points.
     # shape = (num_of_curves, 2, num_of_intersections)
-    intersect_data = calc_curve_data(intersect_x, intersect_y, theta_vec)
+    intersect_data = rot_curves(intersect_x, intersect_y, theta_vec)
     # Transpose to (num_of_curves, num_of_intersections, 2, 1)
     intersect_data = intersect_data.transpose((0, 2, 1))
     intersect_data = intersect_data[..., np.newaxis]
+    # TODO: compute (r,theta) using (x,y) data if they are none
     # Expand intersect_theta to shape (num_of_curves, num_of_intersections)
     theta = intersect_theta.reshape(1, -1) + theta_vec.reshape(-1, 1)
     r = np.kron(np.ones((len(theta_vec), 1)), intersect_r.reshape(1, -1))
@@ -458,6 +514,98 @@ def create_dataframe(curve_data, name=None):
     return curve_df
 
 
+def save_integral_curve_data(curve_data: np.ndarray,
+                             conj_data: np.ndarray = None,
+                             intersection_data: np.ndarray = None,
+                             s_events: np.ndarray = None,
+                             save_dir: Path = None,
+                             curve_file_name: str = None,
+                             conj_curve_file_name: str = None,
+                             intersection_file_name: str = None,) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Create dataframes of integral curve data and save as csv files.
+
+    Args:
+        curve_data (np.ndarray): Data of integral curves.
+        conj_data (np.ndarray, optional): Data of conjugate integral curves.
+            Defaults to None.
+        intersection_data (np.ndarray, optional): Data of intersection points
+            between curves and conjugate curves. Defaults to None.
+        s_events (np.ndarray, optional): Arc-length values of intersection
+            points along the integral curve. Defaults to None.
+        save_dir (Path, optional): Path to directory for saving csv. Defaults to None.
+        curve_file_name (str, optional): Integral curve csv file name. Defaults to None.
+        conj_curve_file_name (str, optional): Conjugate curve csv file name. Defaults to None.
+        intersection_file_name (str, optional): Intersection points csv file name. Defaults to None.
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: 
+            - Dataframe of integral curve data.
+            - Dataframe of conjugate curve data.
+            - Dataframe of intersection points data.
+    """
+    save_dir = Path(save_dir) if save_dir is not None else SAVE_DIR
+    curve_file_name = curve_file_name if curve_file_name is not None else DEF_CURVE_DATA_FILENAME
+    curve_df = create_dataframe(curve_data, 'straw')
+    curve_df.to_csv(str(save_dir / (curve_file_name+'.csv')))
+    # Create dataframe and save conjugate curve data if given
+    if conj_data is not None:
+        conj_curve_file_name = conj_curve_file_name if conj_curve_file_name is not None \
+            else DEF_CONJ_CURVE_DATA_FILENAME
+        conj_df = create_dataframe(conj_data, name='conj_curve')
+        conj_df.to_csv(str(save_dir / (conj_curve_file_name+'.csv')))
+    # Create dataframe and save intersection points data if given
+    if intersection_data is not None:
+        intersection_file_name = intersection_file_name if intersection_file_name is not None \
+            else DEF_INTERSECTION_DATA_FILENAME
+        intersection_df = create_dataframe(intersection_data, name='fixed_points_straw')
+        if s_events is not None:
+            intersection_df['arc_length'] = s_events
+            col_at_start = ['arc_length']
+            intersection_df = intersection_df[[c for c in col_at_start] +
+                                              [c for c in intersection_df
+                                              if c not in col_at_start]]
+
+        intersection_df.to_csv(str(save_dir / (intersection_file_name+'.csv')))
+
+    return curve_df, conj_df, intersection_df
+
+
+def draw_integral_curves(curve_data: np.ndarray,
+                             conj_data: np.ndarray = None,
+                             intersection_data: np.ndarray = None,
+                             draw_conj: bool = True,
+                             draw_intersections: bool = True,
+                             fig=None,
+                             ax=None):
+    """Draw integral curves, conjugate integral curves, and intersection points between them
+
+    Args:
+        curve_data (np.ndarray): Data of integral curves.
+        conj_data (np.ndarray, optional): Data of conjugate integral curves.
+            Defaults to None.
+        intersection_data (np.ndarray, optional): Data of intersection points
+            between curves and conjugate curves. Defaults to None.
+        draw_conj (bool, optional): Flag to draw conjugate curves. Defaults to True.
+        draw_intersections (bool, optional): Flag to draw intersection points. Defaults to True.
+        fig (Figure, optional): Figure to draw on. Defaults to None.
+        ax (Axes, optional): Axes to draw on. Defaults to None.
+
+    Returns:
+        Tuple[Figure, Axes]: Resultant Figure and Axes objects.
+    """
+    # Draw spirals, conjugate spirals, and intersections
+    fig, ax = draw_curve_rotations(curve_data, fig=fig, ax=ax)
+    if conj_data is not None and draw_conj:
+        fig, ax = draw_curve_rotations(conj_data, fig=fig, ax=ax, color='red', linestyle='--')
+
+    if intersection_data is not None and draw_intersections:
+        fig, ax = draw_curve_rotations(intersection_data, fig=fig, ax=ax,
+                                       color=INTERSECT_COLOR, marker='o',
+                                       linestyle='')
+
+    return fig, ax
+
+
 def alpha_const(r, theta, alpha):
     """Compute constant spiral angle
 
@@ -528,12 +676,29 @@ if __name__ == '__main__':
     # args = [alpha]
     # rf = 1
     # num_of_curves = 3
-    fig, ax, s_events, link_len = compute_axisymmetric_integral_curves(
-        alpha_func, ri=ri, rf=rf, num_eval_points=num_eval_points,
-        connect_len=connect_len, args=args,
-        num_of_curves=num_of_curves,
-        conj_ratio=conj_ratio,
-        draw_conj=True)
+    curve_data, conj_data, intersection_data, s_events, theta_vec, \
+        intersect_x, intersect_y, intersect_r, intersect_theta = axisymmetric_integral_curves(
+            alpha_func,
+            ri=ri,
+            rf=rf,
+            num_eval_points=num_eval_points,
+            args=args,
+            conj_ratio=conj_ratio,
+            num_of_curves=num_of_curves)
+    save_integral_curve_data(curve_data, conj_data, intersection_data, s_events)
+    fig, ax = draw_integral_curves(curve_data, conj_data, intersection_data, DRAW_CONJ, DRAW_INTERSECTIONS)
+    # Compute links and connection points
+    links, link_len, connect_left, connect_right = compute_links(
+        connect_len, alpha_func, theta_vec, intersect_x, intersect_y,
+        intersect_r, intersect_theta, args, conj_ratio)
+    # TODO: Find best placement for intersections given frustum lengths.
+    # TODO: Use the minimum link length to disregard unfeasible connector locations.
+    # TODO: Links could be computed at this stage to filter unfeasible connectors.
+    # Plot links and connection points
+    fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
+    # Save figure to file
+    fig.savefig(str(SAVE_DIR / 'director_figure.png'))
+
     np.set_printoptions(precision=1)
     print(f'{s_events = }')
     if np.any(link_len):
