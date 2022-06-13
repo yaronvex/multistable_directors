@@ -290,13 +290,25 @@ def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarr
         ndarray: Data of all rotation curves of shape:
                  (num_of_curves, 2, num_of_eval_points)
     """
+    # Concatenate x and y to one matrix representing the 0 angle curve.
+    # curve_0 = [p_0, p_1, ..., p_n] where each p_i is [[x_i],[y_i]]
+    # the shape of curve_0 is therefore (2, num_eval_points)
     curve_0 = np.concatenate(
         (curve_0_x.reshape(1, -1),  curve_0_y.reshape(1, -1)), axis=0)
+    # Create rotation matrix slices for each initial angle in theta_vec.
+    # The length of theta_vec is num_of_curves.
+    # rot_mat = [R_1,R_2,...R_n] where each R_i is a rotation matrix:
+    # R_i = [[cos(theta_i), -sin(theta_i)]
+    #        [sin(theta_i),  cos(theta_i)]]
+    # The shape of rot_mat is (num_of_curves, 2, 2)
     rot_mat = np.array([[np.cos(theta_vec), -np.sin(theta_vec)],
                         [np.sin(theta_vec), np.cos(theta_vec)]])
     rot_mat = np.moveaxis(rot_mat, -1, 0)
-    curve_data: np.ndarray = rot_mat @ curve_0
-    return curve_data
+    # Get all rotated curves by matrix multiplication of the rotation
+    # matrices and the zero angle curve.
+    # The shape of the returned rotated curve data is:
+    # (num_of_curves, 2, num_eval_points)
+    return rot_mat @ curve_0
 
 
 def place_connectors(alpha_func,
@@ -491,10 +503,7 @@ def compute_links(connect_len: float,
     theta = intersect_theta.reshape(1, -1) + theta_vec.reshape(-1, 1)
     r = np.kron(np.ones((len(theta_vec), 1)), intersect_r.reshape(1, -1))
     # Compute angle alpha for all values of r and theta
-    if args is not None:
-        alpha = alpha_func(r, theta, *args)
-    else:
-        alpha = alpha_func(r, theta)
+    alpha = alpha_func(r, theta) if args is None else alpha_func(r, theta, *args)
     # Rotation matrix from radial direction to normal direction
     rot_angle = alpha + np.pi/2
     rot_norm = np.array([[np.cos(rot_angle), -np.sin(rot_angle)],
@@ -603,7 +612,7 @@ def draw_curve_rotations(curve_data, fig=None, ax=None,
 
 
 def create_dataframe(curve_data: np.ndarray, name: str = None) -> pd.DataFrame:
-    """Create dataframe from curves
+    """Create DataFrame from curves
 
     Args:
         curve_data (np.ndarray): Curve xy coordinate data.
@@ -623,9 +632,8 @@ def create_dataframe(curve_data: np.ndarray, name: str = None) -> pd.DataFrame:
     # Name columns
     columns = [f'{name}_{i//2+1}_x' if i % 2 == 0 else f'{name}_{i//2+1}_y'
                for i in range(data_2d.shape[1])]
-    # Create dataframe
-    curve_df = pd.DataFrame(data_2d, columns=columns)
-    return curve_df
+    # Return DataFrame
+    return pd.DataFrame(data_2d, columns=columns)
 
 
 def save_integral_curve_data(curve_data: np.ndarray,
@@ -675,9 +683,8 @@ def save_integral_curve_data(curve_data: np.ndarray,
         if s_events is not None:
             intersection_df['arc_length'] = s_events
             col_at_start = ['arc_length']
-            intersection_df = intersection_df[[c for c in col_at_start] +
-                                              [c for c in intersection_df
-                                              if c not in col_at_start]]
+            intersection_df = intersection_df[
+                (list(col_at_start) + [c for c in intersection_df if c not in col_at_start])]
 
         intersection_df.to_csv(str(save_dir / (intersection_file_name+'.csv')))
 
