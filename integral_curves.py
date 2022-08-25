@@ -660,7 +660,7 @@ def save_integral_curve_data(curve_data: np.ndarray,
         intersection_file_name (str, optional): Intersection points csv file name. Defaults to None.
 
     Returns:
-        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: 
+        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             - Dataframe of integral curve data.
             - Dataframe of conjugate curve data.
             - Dataframe of intersection points data.
