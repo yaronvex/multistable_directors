@@ -54,7 +54,7 @@ PROTRUDED_DEFORMATION = (PROTRUDED_LEN
                          / (PROTRUDED_LEN - 2*DYN_FRUSTUM_LEN))
 # TRANSITION_DEFORMATION_METHOD = 'exponential'
 TRANSITION_DEFORMATION_METHOD = 'poly'
-TRANSITION_LEN = PROTRUDED_LEN
+TRANSITION_LEN = 10 * PROTRUDED_LEN
 # Number of sampling points
 NUM_RAD_SAMPLES = 200
 # NUM_RAD_SAMPLES = 1000
@@ -290,11 +290,14 @@ def compute_deformed_curve_x(
         protruded_deformation: Number = PROTRUDED_DEFORMATION
         ) -> np.ndarray:
     director_angle, d_director_angle = director_angle_func(radius, *angle_func_args)
+    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
+                                                    angle_func_args)
 
     deformation, d_deformation = compute_deformation_value(
-        radius, director_arc_len, timesteps, transition_len,
-        protruded_len, dyn_frustum_len, snap_slope, viscosity,
-        inner_rad, inlet_pressure, critical_pressure, protruded_deformation)
+        radius, director_arc_len, d_director_arc_len, timesteps,
+        transition_len, protruded_len, dyn_frustum_len, snap_slope,
+        viscosity, inner_rad, inlet_pressure, critical_pressure,
+        protruded_deformation)
 
     cos_a = np.cos(director_angle)
     sin_a = np.sin(director_angle)
@@ -332,8 +335,10 @@ def compute_d_deformed_radius(
         ) -> np.ndarray:  # du
     # This is repeated from compute_deformed_curve_x
     director_angle, _ = director_angle_func(radius, *angle_func_args)
+    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
+                                                    angle_func_args)
     deformation, _ = compute_deformation_value(
-        radius, director_arc_len, timesteps, transition_len,
+        radius, director_arc_len, d_director_arc_len, timesteps, transition_len,
         protruded_len, dyn_frustum_len, snap_slope, viscosity,
         inner_rad, inlet_pressure, critical_pressure, protruded_deformation)
     cos_a = np.cos(director_angle)
@@ -471,6 +476,7 @@ def compute_d_director_arc_len(radius: np.ndarray,
 def compute_deformation_value(
         radius: np.ndarray,
         director_arc_len: np.ndarray,  # (1, k) or (1,)
+        d_director_arc_len: np.ndarray,  # (1, k) or (1,)
         timesteps: np.ndarray,
         transition_len: Number = TRANSITION_LEN,
         protruded_len: Number = PROTRUDED_LEN,
@@ -485,36 +491,36 @@ def compute_deformation_value(
     # Compute the protruded arc-length of the straws for all timesteps
     protruded_arc_len = compute_protruded_arc_len(
         timesteps, protruded_len, snap_slope, dyn_frustum_len,
-        viscosity, inner_rad, inlet_pressure, critical_pressure, protruded_deformation)  # (n-1,)
-    deformation, d_deformation = (
+        viscosity, inner_rad, inlet_pressure, critical_pressure,
+        protruded_deformation)  # (n-1,)
+    deformation, d_deformation_ds = (
             compute_deformation(director_arc_len, protruded_arc_len,
-                                transition_len, protruded_len,
-                                protruded_deformation,))
+                                transition_len, protruded_deformation,))
 
+    d_deformation = d_deformation_ds * d_director_arc_len
     return deformation, d_deformation
 
 
 def compute_deformation(director_arc_len,  # (1,) or (1, k)
                         protruded_arc_len,  # (n-1, )
                         transition_len: Number = TRANSITION_LEN,
-                        protruded_len: Number = PROTRUDED_LEN,
                         protruded_deformation: Number = PROTRUDED_DEFORMATION,
                         ):
-    transition_start = protruded_arc_len - transition_len/2  # (n-1,)
+    transition_start = protruded_arc_len - transition_len  # (n-1,)
     if len(director_arc_len.shape) > 1:
         # If this is not done, and director_arc_len.shape = (1, 1)
         # then the next computation results in a shape of (1, n-1) instead of (n-1, 1)
         transition_start = transition_start.reshape(-1, 1)
-    director_arc_len_norm = (director_arc_len - transition_start) / protruded_len  # (n-1, ) or (n-1, k)
-    deformation_norm, d_deformation_norm = (
+    director_arc_len_norm = (director_arc_len - transition_start) / transition_len  # (n-1, ) or (n-1, k)
+    deformation_norm, d_deformation_norm_ds_norm = (
         compute_deformation_norm(director_arc_len_norm)
     )
     deformation = (deformation_norm
                    * (protruded_deformation - 1) + 1)
-    d_deformation = (d_deformation_norm
-                     * (protruded_deformation - 1) / protruded_len)
+    d_deformation_ds = (d_deformation_norm_ds_norm
+                        * (protruded_deformation - 1) / transition_len)
 
-    return deformation, d_deformation
+    return deformation, d_deformation_ds
 
 
 def compute_deformation_norm(director_arc_len_norm):
@@ -536,14 +542,15 @@ def compute_deformation_norm(director_arc_len_norm):
     coeffs = np.array([1, 0, 0, -10, 15, -6])
     transition_deformation_poly = np.polynomial.Polynomial(coeffs)
     deformation_norm = transition_deformation_poly(director_arc_len_norm)  # (n-1, k) or (n-1, )
-    d_deformation_norm = transition_deformation_poly.deriv(1)(director_arc_len_norm)  # (n-1, k) or (n-1, )
+    d_deformation_norm_ds_norm = transition_deformation_poly.deriv(1)(director_arc_len_norm)  # (n-1, k) or (n-1, )
     # Out of bounds values
     deformation_norm[director_arc_len_norm < 0] = 1
     deformation_norm[director_arc_len_norm > 1] = 0
-    d_deformation_norm[np.logical_or(director_arc_len_norm < 0,
-                                     director_arc_len_norm > 1)] = 0
+    d_deformation_norm_ds_norm[np.logical_or(director_arc_len_norm < 0,
+                                             director_arc_len_norm > 1)] = 0
 
-    return deformation_norm, d_deformation_norm # (n-1, k) or (n-1, )
+    return deformation_norm, d_deformation_norm_ds_norm # (n-1, k) or (n-1, )
+
 
 def draw_deformed_shape(fig, deformed_shape, update=False):
     fig.scene.disable_render = True
@@ -563,7 +570,7 @@ def draw_deformed_shape(fig, deformed_shape, update=False):
 if __name__ == '__main__':
     director_angle_func = sphere_deformation_angle
     angle_func_args = [GAUSSIAN_CURVATURE, PROTRUDED_DEFORMATION]
-    deformed_shape = compute_shape(director_angle_func, angle_func_args, end_time=END_TIME/2)
+    deformed_shape = compute_shape(director_angle_func, angle_func_args, end_time=END_TIME)
     deformed_shape_data = deformed_shape['data']
     timesteps = deformed_shape['timesteps']
 
@@ -574,7 +581,7 @@ if __name__ == '__main__':
 
     fig = mlab.figure("shape_deformation")
     mlab.clf()
-    fig.scene.background = Color("white").rgb
+    fig.scene.background = Color("black").rgb
     fig.scene.foreground = Color("black").rgb
 
     deformed_shape_data_symmetric = np.concatenate(
