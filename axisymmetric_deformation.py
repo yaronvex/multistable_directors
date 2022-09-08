@@ -123,6 +123,13 @@ def sphere_deformation_angle(radius: np.ndarray | Number,
     d_angle[radius < max_rad] = (-d_cosine_expr[radius < max_rad]
                                  / (np.sqrt(1 - cosine_expr[radius < max_rad]**2))
                                  / 2)
+    # Constant (non 0) radius for which the circumference does not change after deformation.
+    # This radius does not exist for a sphere, as the deformation_const < 1 by definition.
+    # If the deformation in the normal direction to the directors would not have been equal to 1,
+    # this radius may have existed.
+    # constant_radius = (np.sqrt(2) / (protruded_deformation * np.sqrt(gaussian_curvature))
+    #                    * np.sqrt((deformation_const - 1) * (1 + protruded_deformation**2)))
+    # print(f'{constant_radius = }')
     return angle, d_angle
 
 
@@ -293,7 +300,7 @@ def compute_deformed_curve_x(
     d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
                                                     angle_func_args)
 
-    deformation, d_deformation = compute_deformation_value(
+    deformation, d_deformation = compute_deformation_per_radius(
         radius, director_arc_len, d_director_arc_len, timesteps,
         transition_len, protruded_len, dyn_frustum_len, snap_slope,
         viscosity, inner_rad, inlet_pressure, critical_pressure,
@@ -337,7 +344,7 @@ def compute_d_deformed_radius(
     director_angle, _ = director_angle_func(radius, *angle_func_args)
     d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
                                                     angle_func_args)
-    deformation, _ = compute_deformation_value(
+    deformation, _ = compute_deformation_per_radius(
         radius, director_arc_len, d_director_arc_len, timesteps, transition_len,
         protruded_len, dyn_frustum_len, snap_slope, viscosity,
         inner_rad, inlet_pressure, critical_pressure, protruded_deformation)
@@ -473,7 +480,7 @@ def compute_d_director_arc_len(radius: np.ndarray,
     return 1 / np.cos(director_angle)
 
 
-def compute_deformation_value(
+def compute_deformation_per_radius(
         radius: np.ndarray,
         director_arc_len: np.ndarray,  # (1, k) or (1,)
         d_director_arc_len: np.ndarray,  # (1, k) or (1,)
@@ -494,18 +501,19 @@ def compute_deformation_value(
         viscosity, inner_rad, inlet_pressure, critical_pressure,
         protruded_deformation)  # (n-1,)
     deformation, d_deformation_ds = (
-            compute_deformation(director_arc_len, protruded_arc_len,
-                                transition_len, protruded_deformation,))
+            compute_deformation_per_arc_len(director_arc_len, protruded_arc_len,
+                                            transition_len, protruded_deformation,))
 
     d_deformation = d_deformation_ds * d_director_arc_len
     return deformation, d_deformation
 
 
-def compute_deformation(director_arc_len,  # (1,) or (1, k)
-                        protruded_arc_len,  # (n-1, )
-                        transition_len: Number = TRANSITION_LEN,
-                        protruded_deformation: Number = PROTRUDED_DEFORMATION,
-                        ):
+def compute_deformation_per_arc_len(
+        director_arc_len,  # (1,) or (1, k)
+        protruded_arc_len,  # (n-1, )
+        transition_len: Number = TRANSITION_LEN,
+        protruded_deformation: Number = PROTRUDED_DEFORMATION,
+        ):
     transition_start = protruded_arc_len - transition_len  # (n-1,)
     if len(director_arc_len.shape) > 1:
         # If this is not done, and director_arc_len.shape = (1, 1)
@@ -570,6 +578,8 @@ def draw_deformed_shape(fig, deformed_shape, update=False):
 if __name__ == '__main__':
     director_angle_func = sphere_deformation_angle
     angle_func_args = [GAUSSIAN_CURVATURE, PROTRUDED_DEFORMATION]
+    # director_angle_func = polynomial_angle
+    # angle_func_args = [np.array(0.0001)]
     deformed_shape = compute_shape(director_angle_func, angle_func_args, end_time=END_TIME)
     deformed_shape_data = deformed_shape['data']
     timesteps = deformed_shape['timesteps']
