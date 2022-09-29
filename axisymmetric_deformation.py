@@ -5,6 +5,7 @@ from mayavi import mlab
 from colour import Color
 from PyQt5 import QtWidgets, QtCore, QtGui
 from numbers import Number
+from typing import Dict, Callable, Tuple
 from scipy.integrate import solve_ivp
 
 # Spiral angle method and coefficients definition:
@@ -54,7 +55,7 @@ PROTRUDED_DEFORMATION = (PROTRUDED_LEN
                          / (PROTRUDED_LEN - 2*DYN_FRUSTUM_LEN))
 # TRANSITION_DEFORMATION_METHOD = 'exponential'
 TRANSITION_DEFORMATION_METHOD = 'poly'
-TRANSITION_LEN = 10 * PROTRUDED_LEN
+TRANSITION_LEN = 20 * PROTRUDED_LEN
 # Number of sampling points
 NUM_RAD_SAMPLES = 200
 # NUM_RAD_SAMPLES = 1000
@@ -68,6 +69,7 @@ END_TIME_NORM = ((NUM_FRUSTA + 1) * NUM_FRUSTA/2
 END_TIME = (8 * VISCOSITY * PROTRUDED_LEN
             / (SNAP_SLOPE * INNER_RAD**2)
             * END_TIME_NORM)
+RAD_MIN_THRESHOLD = 1e-8
 
 
 # Director angle function
@@ -148,7 +150,7 @@ def arc_len_diff(angle: np.ndarray | Number):
 
 # %% Calculation functions
 def compute_shape(
-        director_angle_func,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
         angle_func_args=None,
         end_time: Number = END_TIME,
         num_timesteps: int = 100,
@@ -171,8 +173,6 @@ def compute_shape(
         atol: Number = DEF_ATOL,
         ) -> np.ndarray:
     timesteps = np.linspace(0, end_time, num_timesteps)
-    # 3 here is the number of coordinates (x,y,z)
-    data = np.zeros((num_rad_samples, num_theta_samples, 3, num_timesteps))
     data = compute_deformed_surface(
         timesteps, director_angle_func, angle_func_args, transition_len,
         protruded_len, dyn_frustum_len, snap_slope, viscosity, inner_rad,
@@ -180,12 +180,12 @@ def compute_shape(
         rad_min, rad_max, theta_min, theta_max,
         num_rad_samples, num_theta_samples,
         rtol, atol)
-    return dict(data=data, timesteps=timesteps)
+    return dict(timesteps=timesteps, **data)
 
 
 def compute_deformed_surface(
         timesteps: np.ndarray,
-        director_angle_func,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
         angle_func_args=None,
         transition_len: Number = TRANSITION_LEN,
         protruded_len: Number = PROTRUDED_LEN,
@@ -208,31 +208,49 @@ def compute_deformed_surface(
     radius = np.linspace(rad_min, rad_max, num_rad_samples)
     theta = np.linspace(theta_min, theta_max, num_theta_samples)
     # The shape of the deformed curves is (num_timesteps, num_rad_samples):
-    deformed_curve = compute_deformed_curve(
+    integration_data = compute_deformed_cross_section_curve(
         radius, timesteps, director_angle_func, angle_func_args,
         transition_len, protruded_len, dyn_frustum_len,
         snap_slope, viscosity, inner_rad, inlet_pressure,
         critical_pressure, protruded_deformation,
         rad_min, rtol, atol)  # g2
 
-    deformed_curve_x = deformed_curve['deformed_curve_x']
-    deformed_curve_z = deformed_curve['deformed_curve_z']
+    deformed_curve = integration_data['deformed_curve']
+    deformed_cross_section_curve_x = deformed_curve['deformed_cross_section_curve_x']
+    deformed_cross_section_curve_z = deformed_curve['deformed_cross_section_curve_z']
 
     # The shape of the deformed surface coords is
     # (num_timesteps, num_rad_samples, num_theta_samples):
-    deformed_surf_x = deformed_curve_x[:, :, np.newaxis] * np.cos(theta).reshape(1, 1, -1)
-    deformed_surf_y = deformed_curve_x[:, :, np.newaxis] * np.sin(theta).reshape(1, 1, -1)
-    deformed_surf_z = np.tile(deformed_curve_z[:, :, np.newaxis], (1, 1, len(theta)))
+    deformed_surf_x = (deformed_cross_section_curve_x[:, :, np.newaxis]
+                       * np.cos(theta).reshape(1, 1, -1))
+    deformed_surf_y = (deformed_cross_section_curve_x[:, :, np.newaxis]
+                       * np.sin(theta).reshape(1, 1, -1))
+    deformed_surf_z = np.tile(deformed_cross_section_curve_z[:, :, np.newaxis],
+                              (1, 1, len(theta)))
 
-    # The overall returned shape is
-    # (num_timesteps, num_coords(=3), num_rad_samples, num_theta_samples):
-    return np.stack([deformed_surf_x, deformed_surf_y, deformed_surf_z], axis=1)
+    return dict(
+        # The overall returned shape of the surface
+        # (num_timesteps, num_coords(=3), num_rad_samples, num_theta_samples)
+        surface=np.stack([deformed_surf_x, deformed_surf_y, deformed_surf_z], axis=1),
+        # Deformed cross section curve: (num_timesteps, num_rad_samples)
+        deformed_cross_section_curve_x=deformed_cross_section_curve_x,
+        deformed_cross_section_curve_z=deformed_cross_section_curve_z,
+        # Deformed integral curve theta values
+        deformed_director_theta=integration_data['deformed_director_theta'],
+        deformed_normal_theta=integration_data['deformed_normal_theta'],
+        # (1, num_rad_samples)
+        director_arc_len=integration_data['director_arc_len'],
+        director_theta=integration_data['director_theta'],
+        normal_curve_theta=integration_data['normal_curve_theta'],
+        # (num_timesteps, num_rad_samples)
+        rotational_deformation_angle=integration_data['rotational_deformation_angle']
+        )
 
 
-def compute_deformed_curve(
+def compute_deformed_cross_section_curve(
         radius: np.ndarray,
         timesteps: np.ndarray,
-        director_angle_func,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
         angle_func_args=None,
         transition_len: Number = TRANSITION_LEN,
         protruded_len: Number = PROTRUDED_LEN,
@@ -248,118 +266,79 @@ def compute_deformed_curve(
         atol: Number = DEF_ATOL,
         ) -> np.ndarray:
     angle_func_args = [] if angle_func_args is None else angle_func_args
-    r_span = (rad_min, radius.max())
+    # r_span = (rad_min, radius.max())
+    r_span = (RAD_MIN_THRESHOLD, radius.max())
     r_eval = radius
-    sol = solve_ivp(compute_d_deformed_curve_data, r_span,
-                    y0=np.zeros(len(timesteps) + 1),
+    inner_radius_z_coord = 0
+    init_director_arc_len = 0
+    init_director_theta = 0
+    integration_init = {
+        'z_coords': np.ones(len(timesteps)) * inner_radius_z_coord,
+        'deformed_director_theta': np.ones(len(timesteps)) * init_director_theta,
+        'deformed_normal_theta': np.ones(len(timesteps)) * init_director_theta,
+        'director_arc_len': np.array([init_director_arc_len]),
+        'director_theta': np.array([init_director_theta]),
+        'normal_curve_theta': np.array([init_director_theta]),
+        'deformed_radius': np.ones(len(timesteps)) * np.array([RAD_MIN_THRESHOLD]),
+    }
+    idx_cumsum = np.cumsum([len(val) for val in integration_init.values()])
+    start_idx = dict(zip(integration_init.keys(), np.concatenate([[0], idx_cumsum[:-1]])))
+    end_idx = dict(zip(integration_init.keys(), idx_cumsum))
+    y0 = np.concatenate([val for val in integration_init.values()])
+    sol = solve_ivp(compute_d_deformed_cross_section_curve_data, r_span,
+                    y0=y0,
                     t_eval=r_eval,
                     args=(
-                        timesteps, director_angle_func, angle_func_args,
-                        transition_len, protruded_len, dyn_frustum_len,
-                        snap_slope, viscosity, inner_rad, inlet_pressure,
-                        critical_pressure, protruded_deformation
+                        timesteps, start_idx, end_idx, director_angle_func,
+                        angle_func_args, transition_len, protruded_len,
+                        dyn_frustum_len, snap_slope, viscosity, inner_rad,
+                        inlet_pressure, critical_pressure, protruded_deformation
                         ),
                     rtol=rtol, atol=atol,
                     vectorized=True)
 
-    deformed_curve_z = sol.y[:-1]
-    director_arc_len = sol.y[-1]
+    deformed_cross_section_curve_z = sol.y[start_idx['z_coords']: end_idx['z_coords']]
+    director_arc_len = sol.y[start_idx['director_arc_len']: end_idx['director_arc_len']]
+    director_theta = sol.y[start_idx['director_theta']: end_idx['director_theta']]
+    normal_curve_theta = sol.y[start_idx['normal_curve_theta']: end_idx['normal_curve_theta']]
+    deformed_director_theta = sol.y[start_idx['deformed_director_theta']: end_idx['deformed_director_theta']]
+    deformed_normal_theta = sol.y[start_idx['deformed_normal_theta']: end_idx['deformed_normal_theta']]
 
-    deformed_curve_x, _ = compute_deformed_curve_x(
+    deformed_cross_section_curve_x, _ = compute_deformed_cross_section_curve_x(
         radius, director_arc_len.reshape(1, -1), timesteps,
         director_angle_func, angle_func_args,
         transition_len, protruded_len, dyn_frustum_len,
         snap_slope, viscosity, inner_rad, inlet_pressure,
         critical_pressure, protruded_deformation)
 
+    rotational_deformation_angle = compute_rotational_deformation_angle(
+        radius, director_arc_len.reshape(1, -1), timesteps,
+        director_angle_func, angle_func_args,
+        transition_len, protruded_len, dyn_frustum_len,
+        snap_slope, viscosity, inner_rad, inlet_pressure,
+        critical_pressure, protruded_deformation)  # gamma
+
     deformed_curve = {
-        'deformed_curve_x': deformed_curve_x,
-        'deformed_curve_z': deformed_curve_z,
+        'deformed_cross_section_curve_x': deformed_cross_section_curve_x,
+        'deformed_cross_section_curve_z': deformed_cross_section_curve_z,
     }
 
-    return deformed_curve
+    return dict(deformed_curve=deformed_curve,
+                director_arc_len=director_arc_len,
+                director_theta=director_theta,
+                normal_curve_theta=normal_curve_theta,
+                rotational_deformation_angle=rotational_deformation_angle,
+                deformed_director_theta=deformed_director_theta,
+                deformed_normal_theta=deformed_normal_theta)
 
 
-def compute_deformed_curve_x(
-        radius: np.ndarray,
-        director_arc_len: np.ndarray,
-        timesteps: np.ndarray,
-        director_angle_func,
-        angle_func_args=None,
-        transition_len: Number = TRANSITION_LEN,
-        protruded_len: Number = PROTRUDED_LEN,
-        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
-        snap_slope: Number = SNAP_SLOPE,
-        viscosity: Number = VISCOSITY,
-        inner_rad: Number = INNER_RAD,
-        inlet_pressure: Number = INLET_PRESSURE,
-        critical_pressure: Number = CRITICAL_PRESSURE,
-        protruded_deformation: Number = PROTRUDED_DEFORMATION
-        ) -> np.ndarray:
-    director_angle, d_director_angle = director_angle_func(radius, *angle_func_args)
-    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
-                                                    angle_func_args)
-
-    deformation, d_deformation = compute_deformation_per_radius(
-        radius, director_arc_len, d_director_arc_len, timesteps,
-        transition_len, protruded_len, dyn_frustum_len, snap_slope,
-        viscosity, inner_rad, inlet_pressure, critical_pressure,
-        protruded_deformation)
-
-    cos_a = np.cos(director_angle)
-    sin_a = np.sin(director_angle)
-
-    metric_tensor_rr = cos_a**2 + sin_a**2 * deformation**2
-    sqrt_metric_tensor_rr = np.sqrt(metric_tensor_rr)
-    deformed_curve_x = radius * sqrt_metric_tensor_rr
-
-    # Consider making a function of the derivative using sympy
-    # 2*sin(a)*(cos(a)*da(L**2 - 1) + sin_a**L*dL)
-    d_metric_tensor_rr = (2*sin_a
-                          * (cos_a * d_director_angle * (deformation**2 - 1)
-                             + sin_a * deformation * d_deformation))
-    d_sqrt_metric_tensor_rr = 1/2 * d_metric_tensor_rr / sqrt_metric_tensor_rr
-    d_deformed_curve_x = sqrt_metric_tensor_rr + radius * d_sqrt_metric_tensor_rr
-
-    return deformed_curve_x, d_deformed_curve_x
-
-
-def compute_d_deformed_radius(
-        radius: np.ndarray,
-        director_arc_len: np.ndarray,
-        timesteps: np.ndarray,
-        director_angle_func,
-        angle_func_args=None,
-        transition_len: Number = TRANSITION_LEN,
-        protruded_len: Number = PROTRUDED_LEN,
-        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
-        snap_slope: Number = SNAP_SLOPE,
-        viscosity: Number = VISCOSITY,
-        inner_rad: Number = INNER_RAD,
-        inlet_pressure: Number = INLET_PRESSURE,
-        critical_pressure: Number = CRITICAL_PRESSURE,
-        protruded_deformation: Number = PROTRUDED_DEFORMATION
-        ) -> np.ndarray:  # du
-    # This is repeated from compute_deformed_curve_x
-    director_angle, _ = director_angle_func(radius, *angle_func_args)
-    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
-                                                    angle_func_args)
-    deformation, _ = compute_deformation_per_radius(
-        radius, director_arc_len, d_director_arc_len, timesteps, transition_len,
-        protruded_len, dyn_frustum_len, snap_slope, viscosity,
-        inner_rad, inlet_pressure, critical_pressure, protruded_deformation)
-    cos_a = np.cos(director_angle)
-    sin_a = np.sin(director_angle)
-    metric_tensor_rr = cos_a**2 + sin_a**2 * deformation**2
-    # Up to here
-    return deformation / np.sqrt(metric_tensor_rr)
-
-
-def compute_d_deformed_curve_data(
+def compute_d_deformed_cross_section_curve_data(
         radius: np.ndarray,
         deformed_curve_data: np.ndarray,
         timesteps: np.ndarray,
-        director_angle_func,
+        start_idx: dict,
+        end_idx: dict,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
         angle_func_args=None,
         transition_len: Number = TRANSITION_LEN,
         protruded_len: Number = PROTRUDED_LEN,
@@ -390,28 +369,79 @@ def compute_d_deformed_curve_data(
     Returns:
         Array of derivatives at the given radius values.
     """
-    director_arc_len = deformed_curve_data[-1]
-    if len(deformed_curve_data.shape) > 1:
+    director_arc_len = deformed_curve_data[
+        start_idx['director_arc_len']: end_idx['director_arc_len']]
+
+    deformed_radius = deformed_curve_data[
+        start_idx['deformed_radius']: end_idx['deformed_radius']]
+
+    if len(deformed_curve_data.shape) < 1:
         director_arc_len = director_arc_len[:, np.newaxis]
-    d_deformed_curve_z = compute_d_deformed_curve_z(
+
+    d_deformed_curve_z = compute_d_deformed_cross_section_curve_z(
         radius, director_arc_len, timesteps,
         director_angle_func, angle_func_args,
         transition_len, protruded_len, dyn_frustum_len,
         snap_slope, viscosity, inner_rad, inlet_pressure,
         critical_pressure, protruded_deformation)
+
     d_director_arc_len = (compute_d_director_arc_len(
         radius, director_angle_func, angle_func_args)
                           .reshape(1, -1))
 
-    return (np.concatenate([d_deformed_curve_z, d_director_arc_len], axis=0)
-            .reshape(deformed_curve_data.shape))
+    d_deformed_radius = compute_d_deformed_radius(
+        radius, director_arc_len, timesteps, director_angle_func,
+        angle_func_args, transition_len, protruded_len,
+        dyn_frustum_len, snap_slope, viscosity, inner_rad,
+        inlet_pressure, critical_pressure, protruded_deformation)
+
+    d_deformed_integral_curve_theta = compute_d_deformed_integral_curves_theta(
+        radius, director_arc_len, deformed_radius, timesteps,
+        director_angle_func, angle_func_args,
+        transition_len, protruded_len, dyn_frustum_len,
+        snap_slope, viscosity, inner_rad, inlet_pressure,
+        critical_pressure, protruded_deformation)
+
+    angle_func_args = [] if angle_func_args is None else angle_func_args
+    director_angle, _ = director_angle_func(radius, *angle_func_args)
+    d_director_theta = (np.tan(director_angle) / radius
+                        if radius >= RAD_MIN_THRESHOLD else np.array([0])).reshape(1, -1)
+    d_normal_curve_theta = (np.tan(director_angle - np.pi/2) / radius
+                            if radius >= RAD_MIN_THRESHOLD else np.array([0])).reshape(1, -1)
+
+    # Create a vector of derivative for integration
+    d_deformed_curve_data = np.zeros_like(deformed_curve_data)
+    d_deformed_curve_data[
+        start_idx['z_coords']: end_idx['z_coords']] = d_deformed_curve_z
+    d_deformed_curve_data[
+        start_idx['deformed_director_theta']:
+            end_idx['deformed_director_theta']] = (
+                d_deformed_integral_curve_theta['d_deformed_director_theta'])
+    d_deformed_curve_data[
+        start_idx['deformed_normal_theta']:
+            end_idx['deformed_normal_theta']] = (
+                d_deformed_integral_curve_theta['d_deformed_normal_theta'])
+    d_deformed_curve_data[
+        start_idx['director_arc_len']:
+            end_idx['director_arc_len']] = d_director_arc_len
+    d_deformed_curve_data[
+        start_idx['director_theta']:
+            end_idx['director_theta']] = d_director_theta
+    d_deformed_curve_data[
+        start_idx['normal_curve_theta']:
+            end_idx['normal_curve_theta']] = d_normal_curve_theta
+    d_deformed_curve_data[
+        start_idx['deformed_radius']:
+            end_idx['deformed_radius']] = d_deformed_radius
+
+    return d_deformed_curve_data
 
 
-def compute_d_deformed_curve_z(
+def compute_d_deformed_cross_section_curve_z(
         radius: np.ndarray,
         director_arc_len: np.ndarray,
         timesteps: np.ndarray,
-        director_angle_func,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
         angle_func_args=None,
         transition_len: Number = TRANSITION_LEN,
         protruded_len: Number = PROTRUDED_LEN,
@@ -431,11 +461,187 @@ def compute_d_deformed_curve_z(
         critical_pressure, protruded_deformation
         ]
     d_deformed_radius = compute_d_deformed_radius(*func_input)
-    _, d_deformed_curve_x = compute_deformed_curve_x(*func_input)
+    _, d_deformed_curve_x = compute_deformed_cross_section_curve_x(*func_input)
     d_deformed_curve_z_squared = d_deformed_radius**2 - d_deformed_curve_x**2
     d_deformed_curve_z_squared[d_deformed_curve_z_squared < 0] = 0
 
     return np.sqrt(d_deformed_curve_z_squared)
+
+
+def compute_d_deformed_integral_curves_theta(
+        radius: np.ndarray,
+        director_arc_len: np.ndarray,
+        deformed_radius: np.ndarray,
+        timesteps: np.ndarray,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
+        angle_func_args=None,
+        transition_len: Number = TRANSITION_LEN,
+        protruded_len: Number = PROTRUDED_LEN,
+        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
+        snap_slope: Number = SNAP_SLOPE,
+        viscosity: Number = VISCOSITY,
+        inner_rad: Number = INNER_RAD,
+        inlet_pressure: Number = INLET_PRESSURE,
+        critical_pressure: Number = CRITICAL_PRESSURE,
+        protruded_deformation: Number = PROTRUDED_DEFORMATION
+        ) -> Dict[str, np.ndarray]:
+    # Compute director angle for the given radius and director angle function
+    angle_func_args = [] if angle_func_args is None else angle_func_args
+    director_angle, _ = director_angle_func(radius, *angle_func_args)
+    # Compute the rotation angle between the deformed director curve to
+    # the new radial direction.
+    director_rotation_angle = compute_rotational_deformation_angle(
+        radius, director_arc_len.reshape(1, -1), timesteps,
+        director_angle_func, angle_func_args,
+        transition_len, protruded_len, dyn_frustum_len,
+        snap_slope, viscosity, inner_rad, inlet_pressure,
+        critical_pressure, protruded_deformation)  # gamma
+    # Compute the derivative of the deformed radius values
+    d_deformed_radius = compute_d_deformed_radius(
+        radius, director_arc_len, timesteps, director_angle_func,
+        angle_func_args, transition_len, protruded_len,
+        dyn_frustum_len, snap_slope, viscosity, inner_rad,
+        inlet_pressure, critical_pressure, protruded_deformation)
+    # Compute the derivative of the deformed director curve angle
+    # on the 3D surface.
+    d_deformed_director_theta = np.zeros_like(deformed_radius)
+    d_deformed_director_theta[deformed_radius >= RAD_MIN_THRESHOLD] = (
+        np.tan(director_angle
+               - director_rotation_angle[deformed_radius >= RAD_MIN_THRESHOLD])
+        / deformed_radius[deformed_radius >= RAD_MIN_THRESHOLD]
+        * d_deformed_radius[deformed_radius >= RAD_MIN_THRESHOLD])
+    # Compute the derivative of the deformed normal integral curve angle
+    # on the 3D surface.
+    d_deformed_normal_theta = np.zeros_like(deformed_radius)
+    d_deformed_normal_theta[deformed_radius >= RAD_MIN_THRESHOLD] = (
+        np.tan(director_angle
+               - director_rotation_angle[deformed_radius >= RAD_MIN_THRESHOLD]
+               - np.pi/2)
+        / deformed_radius[deformed_radius >= RAD_MIN_THRESHOLD]
+        * d_deformed_radius[deformed_radius >= RAD_MIN_THRESHOLD])
+    # Return angle derivative values for integral curves
+    return {'d_deformed_director_theta': d_deformed_director_theta,
+            'd_deformed_normal_theta': d_deformed_normal_theta}
+
+
+def compute_deformed_cross_section_curve_x(
+        radius: np.ndarray,
+        director_arc_len: np.ndarray,
+        timesteps: np.ndarray,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
+        angle_func_args=None,
+        transition_len: Number = TRANSITION_LEN,
+        protruded_len: Number = PROTRUDED_LEN,
+        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
+        snap_slope: Number = SNAP_SLOPE,
+        viscosity: Number = VISCOSITY,
+        inner_rad: Number = INNER_RAD,
+        inlet_pressure: Number = INLET_PRESSURE,
+        critical_pressure: Number = CRITICAL_PRESSURE,
+        protruded_deformation: Number = PROTRUDED_DEFORMATION
+        ) -> Tuple[np.ndarray, np.ndarray]:
+    angle_func_args = [] if angle_func_args is None else angle_func_args
+    director_angle, d_director_angle = director_angle_func(radius, *angle_func_args)
+    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
+                                                    angle_func_args)
+
+    deformation, d_deformation = compute_deformation_per_radius(
+        radius, director_arc_len, d_director_arc_len, timesteps,
+        transition_len, protruded_len, dyn_frustum_len, snap_slope,
+        viscosity, inner_rad, inlet_pressure, critical_pressure,
+        protruded_deformation)
+
+    cos_a = np.cos(director_angle)
+    sin_a = np.sin(director_angle)
+
+    metric_tensor_rr = cos_a**2 + sin_a**2 * deformation**2
+    sqrt_metric_tensor_rr = np.sqrt(metric_tensor_rr)
+    deformed_cross_section_curve_x = radius * sqrt_metric_tensor_rr
+
+    # Consider making a function of the derivative using sympy
+    # 2*sin(a)*(cos(a)*da(L**2 - 1) + sin_a**L*dL)
+    d_metric_tensor_rr = (2*sin_a
+                          * (cos_a * d_director_angle * (deformation**2 - 1)
+                             + sin_a * deformation * d_deformation))
+    d_sqrt_metric_tensor_rr = 1/2 * d_metric_tensor_rr / sqrt_metric_tensor_rr
+    d_deformed_curve_x = sqrt_metric_tensor_rr + radius * d_sqrt_metric_tensor_rr
+
+    return deformed_cross_section_curve_x, d_deformed_curve_x
+
+
+def compute_rotational_deformation_angle(
+        radius: np.ndarray,
+        director_arc_len: np.ndarray,
+        timesteps: np.ndarray,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
+        angle_func_args=None,
+        transition_len: Number = TRANSITION_LEN,
+        protruded_len: Number = PROTRUDED_LEN,
+        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
+        snap_slope: Number = SNAP_SLOPE,
+        viscosity: Number = VISCOSITY,
+        inner_rad: Number = INNER_RAD,
+        inlet_pressure: Number = INLET_PRESSURE,
+        critical_pressure: Number = CRITICAL_PRESSURE,
+        protruded_deformation: Number = PROTRUDED_DEFORMATION
+        ) -> np.ndarray:
+    angle_func_args = [] if angle_func_args is None else angle_func_args
+    director_angle, _ = director_angle_func(radius, *angle_func_args)
+    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
+                                                    angle_func_args)
+
+    deformation, _ = compute_deformation_per_radius(
+        radius, director_arc_len, d_director_arc_len, timesteps,
+        transition_len, protruded_len, dyn_frustum_len, snap_slope,
+        viscosity, inner_rad, inlet_pressure, critical_pressure,
+        protruded_deformation)
+
+    rotational_deformation_angle = np.arctan2(
+        np.tan(director_angle) * (1 - deformation),
+        1 + deformation*(np.tan(director_angle)**2)
+        )
+    # rotational_deformation_angle = np.arctan2(
+    #     np.tan(director_angle) * (1 - deformation),
+    #     1 + (np.tan(director_angle)**2)
+    #     )
+    # rotational_deformation_angle = np.arctan(
+    #     (np.tan(director_angle) * (1 - deformation))
+    #     / (1 + deformation*(np.tan(director_angle)**2))
+    #     )
+
+    return rotational_deformation_angle
+
+
+def compute_d_deformed_radius(
+        radius: np.ndarray,
+        director_arc_len: np.ndarray,
+        timesteps: np.ndarray,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
+        angle_func_args=None,
+        transition_len: Number = TRANSITION_LEN,
+        protruded_len: Number = PROTRUDED_LEN,
+        dyn_frustum_len: Number = DYN_FRUSTUM_LEN,
+        snap_slope: Number = SNAP_SLOPE,
+        viscosity: Number = VISCOSITY,
+        inner_rad: Number = INNER_RAD,
+        inlet_pressure: Number = INLET_PRESSURE,
+        critical_pressure: Number = CRITICAL_PRESSURE,
+        protruded_deformation: Number = PROTRUDED_DEFORMATION
+        ) -> np.ndarray:  # du
+    # This is repeated from compute_deformed_curve_x
+    angle_func_args = [] if angle_func_args is None else angle_func_args
+    director_angle, _ = director_angle_func(radius, *angle_func_args)
+    d_director_arc_len = compute_d_director_arc_len(radius, director_angle_func,
+                                                    angle_func_args)
+    deformation, _ = compute_deformation_per_radius(
+        radius, director_arc_len, d_director_arc_len, timesteps, transition_len,
+        protruded_len, dyn_frustum_len, snap_slope, viscosity,
+        inner_rad, inlet_pressure, critical_pressure, protruded_deformation)
+    cos_a = np.cos(director_angle)
+    sin_a = np.sin(director_angle)
+    metric_tensor_rr = cos_a**2 + sin_a**2 * deformation**2
+    # Up to here
+    return deformation / np.sqrt(metric_tensor_rr)
 
 
 def compute_protruded_arc_len(
@@ -473,9 +679,11 @@ def compute_protruded_arc_len(
     return protruded_arc_len/(protruded_deformation - 1)  # (n-1,)
 
 
-def compute_d_director_arc_len(radius: np.ndarray,
-                               director_angle_func,
-                               angle_func_args=None) -> np.ndarray:  # ds
+def compute_d_director_arc_len(
+        radius: np.ndarray,
+        director_angle_func: Callable[..., Tuple[np.ndarray, np.ndarray]],
+        angle_func_args=None) -> np.ndarray:  # ds
+    angle_func_args = [] if angle_func_args is None else angle_func_args
     director_angle, _ = director_angle_func(radius, *angle_func_args)
     return 1 / np.cos(director_angle)
 
@@ -560,6 +768,47 @@ def compute_deformation_norm(director_arc_len_norm):
     return deformation_norm, d_deformation_norm_ds_norm # (n-1, k) or (n-1, )
 
 
+# %%
+def compute_deformed_curve(deformed_cross_section_curve_x,  # (num_timesteps, num_rad_samples)
+                           deformed_cross_section_curve_z,  # (num_timesteps, num_rad_samples)
+                           deformed_curve_theta,  # (num_timesteps, num_rad_samples)
+                           init_rotation,  # scalar
+                           ):
+    deformed_curve_x = (deformed_cross_section_curve_x
+                        * np.cos(deformed_curve_theta
+                                 - deformed_curve_theta[:, 0].reshape(-1, 1)
+                                 + init_rotation))
+    deformed_curve_y = (deformed_cross_section_curve_x
+                        * np.sin(deformed_curve_theta
+                                 - deformed_curve_theta[:, 0].reshape(-1, 1)
+                                 + init_rotation))
+    deformed_curve_z = deformed_cross_section_curve_z
+    # output shape: (num_timesteps, 3, num_rad_samples)
+    return np.stack([deformed_curve_x, deformed_curve_y, deformed_curve_z], axis=1)
+
+
+def compute_deformed_curve_concentric_rotations(
+        deformed_cross_section_curve_x,  # (num_timesteps, num_rad_samples)
+        deformed_cross_section_curve_z,  # (num_timesteps, num_rad_samples)
+        undeformed_theta,  # (1, num_rad_samples)
+        rotational_deformation_angle  # (num_timesteps, num_rad_samples)
+        ):
+    deformed_curve_x = (deformed_cross_section_curve_x
+                        * np.cos(undeformed_theta
+                                 + rotational_deformation_angle
+                                 - rotational_deformation_angle[:, 0].reshape(-1, 1)
+                                 ))
+    deformed_curve_y = (deformed_cross_section_curve_x
+                        * np.sin(undeformed_theta
+                                 + rotational_deformation_angle
+                                 - rotational_deformation_angle[:, 0].reshape(-1, 1)
+                                 ))
+    deformed_curve_z = deformed_cross_section_curve_z
+    # output shape: (num_timesteps, 3, num_rad_samples)
+    return np.stack([deformed_curve_x, deformed_curve_y, deformed_curve_z], axis=1)
+
+
+# %%
 def draw_deformed_shape(fig, deformed_shape, update=False):
     fig.scene.disable_render = True
     if update and DEFORMED_SHAPE_PLOT is not None:
@@ -580,10 +829,127 @@ if __name__ == '__main__':
     angle_func_args = [GAUSSIAN_CURVATURE, PROTRUDED_DEFORMATION]
     # director_angle_func = polynomial_angle
     # angle_func_args = [np.array(0.0001)]
-    deformed_shape = compute_shape(director_angle_func, angle_func_args, end_time=END_TIME)
-    deformed_shape_data = deformed_shape['data']
-    timesteps = deformed_shape['timesteps']
+    # angle_func_args = [np.array(0.1)]
+    data = compute_shape(director_angle_func, angle_func_args, end_time=3.5*END_TIME)
+    # Data is of shape:
+    # (num_timesteps, num_coords(=3), num_rad_samples, num_theta_samples)
+    deformed_shape_data = data['surface']
+    timesteps = data['timesteps']
 
+    data_z = (data['deformed_cross_section_curve_z']
+              - data['deformed_cross_section_curve_z'][:, 0].reshape(-1, 1))
+
+    relevant_idx = np.concatenate([data['deformed_cross_section_curve_x'][1:, 0] > 0, [True]])
+    data_x = data['deformed_cross_section_curve_x'][relevant_idx]
+    data_z = data_z[relevant_idx]
+
+    deformed_shape_data = deformed_shape_data[relevant_idx]
+    deformed_shape_data[:, -1] -= deformed_shape_data[:, -1, 0][:, np.newaxis, :]
+
+    # Symmetric deflation (TODO: Compute deflation as well)
+    deformed_shape_data_symmetric = np.concatenate(
+        [deformed_shape_data, deformed_shape_data[::-1]], axis=0)
+
+    # Director and normal curve deformations
+    num_directors = 12
+    normal_ratio = 2
+    theta_vec = np.linspace(0, 2*np.pi, num_directors+1)[:-1]
+    normal_theta_vec = np.linspace(0, 2*np.pi, normal_ratio*(num_directors)+1)[:-1]
+
+    draw_directors = True
+    draw_normals = True
+
+    if draw_directors:
+        deformed_director_theta = data['deformed_director_theta'][relevant_idx]
+        deformed_director_curve_data = [
+            # output shape: (num_timesteps, 3, num_rad_samples)
+            compute_deformed_curve(data_x, data_z, deformed_director_theta, theta)
+            for theta in theta_vec]
+
+        # rotational_deformation_angle = data['rotational_deformation_angle'][relevant_idx]
+        # deformed_director_curve_data = [
+        #     compute_deformed_curve_concentric_rotations(
+        #         data_x, data_z,
+        #         data['director_theta'] + theta,
+        #         rotational_deformation_angle)
+        #     for theta in theta_vec]
+
+        # Symmetric deflation (TODO: Compute deflation as well)
+        deformed_director_curve_symmetric = [
+            # (2*num_timesteps, 3, num_rad_samples)
+            np.concatenate(
+                [deformed_director_curve,
+                 deformed_director_curve[::-1]], axis=0)
+            for deformed_director_curve in deformed_director_curve_data]
+
+        # Start index of each curve
+        director_curve_len_cumsum = (
+            np.cumsum([
+                curve_data.shape[-1]
+                for curve_data in deformed_director_curve_data])
+            - deformed_director_curve_data[0].shape[-1])
+        # Line connection arrays
+        director_connections = [
+            (np.vstack(
+                [np.arange(curve_start_idx,
+                           curve_start_idx + curve_data.shape[-1] - 1.5),
+                 np.arange(curve_start_idx + 1,
+                           curve_start_idx + curve_data.shape[-1] - .5)])
+             .T)
+            for curve_start_idx, curve_data in
+            zip(director_curve_len_cumsum, deformed_director_curve_data)]
+
+    if draw_normals:
+        # deformed_normal_curve_data = [
+        #     compute_deformed_curve(
+        #         data_x, data_z,
+        #         data['deformed_normal_theta'],
+        #         theta)
+        #     for theta in normal_theta_vec]
+
+        deformed_normal_curve_data = [
+            compute_deformed_curve_concentric_rotations(
+                data_x, data_z,
+                data['normal_curve_theta']
+                + theta
+                - data['normal_curve_theta'][:, 0],
+                deformed_director_theta
+                - deformed_director_theta[0, :].reshape(1, -1))
+            for theta in normal_theta_vec]
+
+        # deformed_normal_curve_data = [
+        #     compute_deformed_curve_concentric_rotations(
+        #         data_x,
+        #         data_z,
+        #         data['normal_curve_theta'] + theta,
+        #         rotational_deformation_angle)
+        #     for theta in normal_theta_vec]
+
+        # Symmetric deflation (TODO: Compute deflation as well)
+        deformed_normal_curve_symmetric = [
+            np.concatenate(
+                [deformed_normal_curve,
+                 deformed_normal_curve[::-1]], axis=0)
+            for deformed_normal_curve in deformed_normal_curve_data]
+
+        # Start index of each curve
+        normal_curve_len_cumsum = (
+            np.cumsum([
+                curve_data.shape[-1]
+                for curve_data in deformed_normal_curve_data])
+            - deformed_normal_curve_data[0].shape[-1])
+        # Line connection arrays
+        normal_connections = [
+            (np.vstack(
+                [np.arange(curve_start_idx,
+                           curve_start_idx + curve_data.shape[-1] - 1.5),
+                 np.arange(curve_start_idx + 1,
+                           curve_start_idx + curve_data.shape[-1] - .5)])
+             .T)
+            for curve_start_idx, curve_data in
+            zip(normal_curve_len_cumsum, deformed_normal_curve_data)]
+
+    # Plot animation
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)  # enable high dpi scaling
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)  # use high dpi icons
     os.environ['ETS_TOOLKIT'] = 'qt5'
@@ -594,27 +960,107 @@ if __name__ == '__main__':
     fig.scene.background = Color("black").rgb
     fig.scene.foreground = Color("black").rgb
 
-    deformed_shape_data_symmetric = np.concatenate(
-        [deformed_shape_data, deformed_shape_data[::-1]], axis=0)
     # draw_deformed_shape(fig, deformed_shape_data[0])
     start_idx = 0
+
     deformed_shape_plot = mlab.mesh(
         deformed_shape_data_symmetric[start_idx, 0],
         deformed_shape_data_symmetric[start_idx, 1],
         deformed_shape_data_symmetric[start_idx, 2],
-        figure=fig)
+        figure=fig,
+        color=Color('black').rgb,
+        opacity=0.6)
+
+    if draw_directors:
+        # Create the points
+        director_curve_stack = np.hstack(
+            # (3, num_rad_samples)
+            [deformed_director_curve[start_idx]
+             for deformed_director_curve in deformed_director_curve_symmetric])
+
+        director_src = mlab.pipeline.scalar_scatter(
+            director_curve_stack[0],
+            director_curve_stack[1],
+            director_curve_stack[2])
+
+        # Connect them
+        director_connection_stack = np.vstack(director_connections)
+        director_src.mlab_source.dataset.lines = director_connection_stack
+        director_src.update()
+
+        # The stripper filter cleans up connected lines
+        director_lines = mlab.pipeline.stripper(director_src)
+
+        # Create tubes
+        director_tubes = mlab.pipeline.tube(director_lines,
+                                            tube_radius=1e-2)
+        # Draw tubes
+        director_surfs = mlab.pipeline.surface(director_tubes,
+                                               color=Color("lime").rgb,
+                                               figure=fig)
+
+    if draw_normals:
+        # Create the points
+        normal_curve_stack = np.hstack(
+            # (3, num_rad_samples)
+            [deformed_normal_curve[start_idx]
+             for deformed_normal_curve in deformed_normal_curve_symmetric])
+
+        normal_src = mlab.pipeline.scalar_scatter(
+            normal_curve_stack[0],
+            normal_curve_stack[1],
+            normal_curve_stack[2])
+
+        # Connect them
+        normal_connection_stack = np.vstack(normal_connections)
+        normal_src.mlab_source.dataset.lines = normal_connection_stack
+        normal_src.update()
+
+        # The stripper filter cleans up connected lines
+        normal_lines = mlab.pipeline.stripper(normal_src)
+
+        # Create tubes
+        normal_tubes = mlab.pipeline.tube(normal_lines,
+                                          tube_radius=3e-3)
+        # Draw tubes
+        normal_surfs = mlab.pipeline.surface(normal_tubes,
+                                             color=Color("white").rgb,
+                                             figure=fig)
 
     @mlab.animate(delay=100)
     def anim():
         epochs = 100
         for epoch in range(epochs):
-            for deformed_shape in deformed_shape_data_symmetric:
+            for i in range(deformed_shape_data_symmetric.shape[0]):
+                fig.scene.disable_render = True
                 # Update the graphics
                 # draw_deformed_shape(fig, deformed_shape, update=True)
                 deformed_shape_plot.mlab_source.set(
-                    x=deformed_shape[0],
-                    y=deformed_shape[1],
-                    z=deformed_shape[2])
+                    x=deformed_shape_data_symmetric[i, 0],
+                    y=deformed_shape_data_symmetric[i, 1],
+                    z=deformed_shape_data_symmetric[i, 2])
+
+                if draw_directors:
+                    director_curve_stack = np.hstack(
+                        [deformed_director_curve[i]
+                         for deformed_director_curve in deformed_director_curve_symmetric])
+
+                    director_surfs.mlab_source.set(
+                        x=director_curve_stack[0],
+                        y=director_curve_stack[1],
+                        z=director_curve_stack[2])
+
+                if draw_normals:
+                    normal_curve_stack = np.hstack(
+                        [normal_director_curve[i]
+                         for normal_director_curve in deformed_normal_curve_symmetric])
+
+                    normal_surfs.mlab_source.set(
+                        x=normal_curve_stack[0],
+                        y=normal_curve_stack[1],
+                        z=normal_curve_stack[2])
+
+                fig.scene.disable_render = False
                 yield
                 gc.collect(generation=1)
 
