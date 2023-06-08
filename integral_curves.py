@@ -1,10 +1,19 @@
 import numpy as np
 import pandas as pd
+import matplotlib
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from pathlib import Path
 from typing import Tuple
+from numbers import Number
 
+# If you want to save the file to open in ipe, change the following to True.
+# Note that you need to have the matplotlib ipe backend files in your directory.
+# These can be downloaded from https://github.com/otfried/ipe-tools/tree/master/matplotlib.
+SAVE_TO_IPE = False
+
+if SAVE_TO_IPE:
+    matplotlib.use('module://backend_ipe')
 
 NUM_FRUSTA = 78
 MIN_LENGTH = 80.  # mm
@@ -27,6 +36,9 @@ DEF_INTERSECTION_DATA_FILENAME = 'fixed_points_straw'
 
 DRAW_CONJ = True
 DRAW_INTERSECTIONS = True
+DRAW_LINKS = True
+DRAW_GRID = False
+DRAW_AXES = False
 
 DEF_RTOL = 1e-8
 DEF_ATOL = 1e-8
@@ -50,9 +62,9 @@ def integral_curve(alpha_func, ri, rf, theta_i,
     Args:
         alpha_func (object): Angle function of radius function
                              from radial direction to spiral.
-        ri (float): Initial radius of spiral.
-        rf (float): Final radius of spiral.
-        theta_i (float): Initial angle from x axis to spiral
+        ri (Number): Initial radius of spiral.
+        rf (Number): Final radius of spiral.
+        theta_i (Number): Initial angle from x axis to spiral
         num_eval_points (int, optional): Number of evaluation points of the
                                          spiral curve. Defaults to
                                          DEF_NUM_EVAL_POINTS.
@@ -85,7 +97,7 @@ def calc_dy(r, theta, alpha_func, *args):
     defined by the spiral angle function for a given radius
 
     Args:
-        r (float or ndarray): Radius of the spiral point of shape (N, )
+        r (Number or ndarray): Radius of the spiral point of shape (N, )
         theta (list, ndarray): Angles of the spiral point and the
                                conjugate spiral point
         alpha_func (function): Spiral angle function
@@ -110,37 +122,37 @@ def intersection_event(r, y, *args, th2_0):
     Event function for finding intersections
 
     Args:
-        r (float): Radius at which to calculate the angle difference
+        r (Number): Radius at which to calculate the angle difference
         y (list, ndarray): Current solution vector containing the
                            angles of the two curves.
-        th2_0 (float): Starting angle of the second curve
+        th2_0 (Number): Starting angle of the second curve
 
     Returns:
-        float: Angle difference between curves at given point, normalized
+        Number: Angle difference between curves at given point, normalized
                so it will change signs at each intersection of the curves.
     """
     theta_1 = y[THETA_IDX]
     theta_2 = y[CONJ_IDX] + th2_0
     delta_theta = theta_1 - theta_2
-    delta_theta = (-1)**(np.abs(delta_theta)//(2*np.pi)) *\
-        np.fmod(delta_theta, 2*np.pi)
+    delta_theta = ((-1)**(np.abs(delta_theta)//(2*np.pi))
+                   * np.fmod(delta_theta, 2*np.pi))
     return delta_theta
 
 
-def arc_len_event(r, y, *args, arc_len):
+def arc_len_event(r, y, *args, arc_len, length_idx=LENGTH_IDX):
     """Find arc-length difference between curve and given arc-length.
     Use as an event function to find points of length 's' along integral curve.
 
     Args:
-        r (float): Radius at which to calculate the angle difference
+        r (Number): Radius at which to calculate the angle difference
         y (list, ndarray): Current solution vector containing the
                            angles and length of the current integral curve.
-        arc_len (float): Desired arc-length value.
+        arc_len (Number): Desired arc-length value.
 
     Returns:
-        float: Arc-length difference between the integral curve and the desired arc-length
+        Number: Arc-length difference between the integral curve and the desired arc-length
     """
-    arc_len_integral = y[LENGTH_IDX]
+    arc_len_integral = y[length_idx]
     return arc_len - arc_len_integral
 
 
@@ -148,7 +160,8 @@ def axisymmetric_integral_curves(alpha_func, ri=DEF_MIN_RAD,
                                  rf=DEF_MAX_RAD, num_eval_points=None,
                                  args=None,
                                  num_of_curves: int = DEF_NUM_CURVES,
-                                 conj_ratio: int = DEF_NUM_CURVES):
+                                 conj_ratio: int = DEF_NUM_CURVES,
+                                 max_len=None):
     """Calculate and draw axisymmetric integral curves for a given spiral angle
     function. Calculate conjugate integral curves that intersect the original
     curves at a 90 degree angle. Calculate the intersection points between the
@@ -156,8 +169,8 @@ def axisymmetric_integral_curves(alpha_func, ri=DEF_MIN_RAD,
 
     Args:
         alpha_func (function): Spiral angle function
-        ri (float, optional): Initial radius. Defaults to DEF_MIN_RAD.
-        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
+        ri (Number, optional): Initial radius. Defaults to DEF_MIN_RAD.
+        rf (Number, optional): Final radius. Defaults to DEF_MAX_RAD.
         num_eval_points (int, optional): Number of evaluation points for each
                                          spiral curve. Defaults to None.
         args (list or tuple, optional): Additional arguments for alpha_func.
@@ -181,13 +194,12 @@ def axisymmetric_integral_curves(alpha_func, ri=DEF_MIN_RAD,
     # Calculate integral spiral curve assuming starting angle of 0
     theta_vec, intersect_theta_vec, curve_0_x, curve_0_y, r_events, y_events =\
         zero_angle_integral_curve(
-            alpha_func, ri, rf, num_eval_points, args, num_of_curves, conj_ratio)
+            alpha_func, ri, rf, num_eval_points, args, num_of_curves, conj_ratio, max_len)
     spiral_x, conj_x = curve_0_x
     spiral_y, conj_y = curve_0_y
     # Calculate x,y coordinates of intersections between conjugate spiral
     # curves and the 0 starting angle curve
-    intersections, s_events, intersect_r, intersect_theta = events2points(r_events, y_events)
-    intersect_x, intersect_y = intersections
+    intersect_x, intersect_y, s_events, intersect_r, intersect_theta = events2points(r_events, y_events)
     # Calculate data of all rotated curves
     curve_data = rot_curves(spiral_x, spiral_y, theta_vec)
     conj_data = rot_curves(conj_x, conj_y, intersect_theta_vec)
@@ -200,13 +212,14 @@ def axisymmetric_integral_curves(alpha_func, ri=DEF_MIN_RAD,
 def zero_angle_integral_curve(alpha_func, ri=DEF_MIN_RAD, rf=DEF_MAX_RAD,
                               num_eval_points=None, args=None,
                               num_of_curves=DEF_NUM_CURVES,
-                              conj_ratio: int=DEF_NUM_CURVES):
+                              conj_ratio: int = DEF_NUM_CURVES,
+                              max_len=None):
     """Compute an integral spiral curve starting and angle theta = 0
 
     Args:
         alpha_func (function): Spiral angle function
-        ri (float, optional): Initial radius. Defaults to MIN_RAD.
-        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
+        ri (Number, optional): Initial radius. Defaults to MIN_RAD.
+        rf (Number, optional): Final radius. Defaults to DEF_MAX_RAD.
         num_eval_points (int, optional): Number of evaluation points for each
                                          spiral curve. Defaults to None.
         args (list or tuple, optional): Additional arguments for alpha_func.
@@ -238,12 +251,24 @@ def zero_angle_integral_curve(alpha_func, ri=DEF_MIN_RAD, rf=DEF_MAX_RAD,
     events = [
         lambda r, y, *args, th2_0=th2_0: (
             intersection_event(r, y, *args, th2_0=th2_0)) for th2_0 in intersect_theta_vec]
+
+    if max_len is not None:
+        def max_len_event(r, y, *args, arc_len=max_len):
+            return arc_len_event(r, y, *args, arc_len=arc_len)
+        max_len_event.terminal = True
+        events.append(max_len_event)
+
     # Compute integral curves and intersections
     sol = integral_curve(
         alpha_func, ri, rf, [0, 0, 0], num_eval_points, args=args,
         events=events)
     # Extract solution
     curve_0_x, curve_0_y, r_events, y_events = sol
+
+    if max_len is not None:
+        r_events = r_events[:-1]
+        y_events = y_events[:-1]
+
     return theta_vec, intersect_theta_vec, curve_0_x, curve_0_y, r_events, y_events
 
 
@@ -263,19 +288,26 @@ def events2points(r_events, y_events):
     # Find all valid intersections
     y_valid = []
     r_valid = []
+    x_event = None
+    y_event = None
+    s_events = None
+    r_event_vec = None
+    theta_event_vec = None
+
     for y_event, r_event in zip(y_events, r_events):
         if y_event.size > 1:
             r_valid.append(r_event)
             y_valid.append(y_event)
 
-    r_event_vec = np.concatenate(r_valid).reshape(1, -1)
-    y_event_vec = np.concatenate(y_valid).reshape(-1, Y_LEN).T
-    theta_event_vec = y_event_vec[THETA_IDX]
-    s_events = np.sort(y_event_vec[LENGTH_IDX])
-    x_event = r_event_vec * np.cos(theta_event_vec)
-    y_event = r_event_vec * np.sin(theta_event_vec)
-    xy_events = np.concatenate([x_event, y_event], axis=0)
-    return xy_events, s_events, r_event_vec, theta_event_vec
+    if len(r_valid) > 0:
+        r_event_vec = np.concatenate(r_valid).reshape(1, -1)
+        y_event_vec = np.concatenate(y_valid).reshape(-1, Y_LEN).T
+        theta_event_vec = y_event_vec[THETA_IDX]
+        s_events = np.sort(y_event_vec[LENGTH_IDX])
+        x_event = r_event_vec * np.cos(theta_event_vec)
+        y_event = r_event_vec * np.sin(theta_event_vec)
+
+    return x_event, y_event, s_events, r_event_vec, theta_event_vec
 
 
 def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarray):
@@ -314,13 +346,13 @@ def rot_curves(curve_0_x: np.ndarray, curve_0_y: np.ndarray, theta_vec: np.ndarr
 def place_connectors(alpha_func,
                      theta_vec: np.ndarray,
                      s_events: np.ndarray,
-                     connect_len: float = CONNECTOR_LENGTH,
-                     ri: float = DEF_MIN_RAD,
-                     rf: float = DEF_MAX_RAD,
+                     connect_len: Number = CONNECTOR_LENGTH,
+                     ri: Number = DEF_MIN_RAD,
+                     rf: Number = DEF_MAX_RAD,
                      num_elements: int = NUM_FRUSTA,
-                     l_static: float = FRUSTUM_STATIC_LEN,
-                     l_dyn: float = FRUSTUM_DYNAMIC_LEN,
-                     min_link_len: float = MIN_LINK_LENGTH,
+                     l_static: Number = FRUSTUM_STATIC_LEN,
+                     l_dyn: Number = FRUSTUM_DYNAMIC_LEN,
+                     min_link_len: Number = MIN_LINK_LENGTH,
                      args: list = None,
                      conj_ratio: int = 1,):
     """Find best places to place connectors given the theoretical intersection
@@ -331,17 +363,17 @@ def place_connectors(alpha_func,
                                director given (r,theta).
         theta_vec (np.ndarray): Vector of starting angles of straws.
         s_events (np.ndarray): Arc-length values of intersection.
-        connect_len (float, optional): Straw connector length.
+        connect_len (Number, optional): Straw connector length.
                                        Defaults to CONNECTOR_LENGTH.
-        ri (float, optional): Initial radius. Defaults to DEF_MIN_RAD.
-        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
+        ri (Number, optional): Initial radius. Defaults to DEF_MIN_RAD.
+        rf (Number, optional): Final radius. Defaults to DEF_MAX_RAD.
         num_elements (int, optional): Number of bi-stable elements in the straw.
                                       Defaults to NUM_FRUSTA.
-        l_static (float, optional): Length of the static frustum of the straw.
+        l_static (Number, optional): Length of the static frustum of the straw.
                                     Defaults to FRUSTUM_STATIC_LEN.
-        l_dyn (float, optional): Length of the dynamic frustum of the straw.
+        l_dyn (Number, optional): Length of the dynamic frustum of the straw.
                                  Defaults to FRUSTUM_DYNAMIC_LEN.
-        min_link_len (float, optional): Minimum feasible link length.
+        min_link_len (Number, optional): Minimum feasible link length.
                                         Defaults to MIN_LINK_LENGTH.
         args (list or tuple, optional): Additional arguments for alpha_func.
                                         Defaults to None.
@@ -372,13 +404,30 @@ def place_connectors(alpha_func,
         s_new_last = 0  # Last value of connector arc_length.
         n_acc_last = 0  # The frusta on which the last connector is installed.
         for s in approx_arc_len:
-            # Theoretical number of retracted elements between connectors (float).
-            n_theory = (s - s_new_last - (l_static+l_dyn))/(l_static-l_dyn)
+            # Theoretical number of retracted elements between connectors (Number).
+
+            # OLD:
+            #   Take into account that each connection leads to an open frusta.
+            #   Compute the new minimal start length and average deformation:
+            #   The approximate arc-length of the current connection
+            #   minus the arc-length of the previous connection
+            #   minus the length of an open frustum (static length + dynamic length)
+            #   divided by the length of a retracted frustum (static length - dynamic length)
+            # n_theory = (s - s_new_last - (l_static + l_dyn)) / (l_static - l_dyn)
+
+            # UPDATED:
+            #   The approximate arc-length of the current connection
+            #   minus the arc-length of the previous connection
+            #   divided by the length of a retracted frustum (static length - dynamic length)
+            #   minus 1 (current frustum)
+            n_theory = (s - s_new_last) / (l_static - l_dyn) - 1
+
             # Rounded number of retracted elements between connectors.
             n_minus, n_plus = np.floor(n_theory), np.ceil(n_theory)
             # Find the number of retracted elements that result in the lowest
             # arc-length error. Filter out infeasible numbers
             if n_plus < 0 or n_minus >= (num_elements - n_acc_last):
+                s_new.append(np.nan)
                 continue
             elif n_minus < 0:
                 n_best = n_plus
@@ -386,15 +435,22 @@ def place_connectors(alpha_func,
                 n_best = n_minus
             else:
                 n_list = [n_minus, n_plus]
-                err = [np.abs(s - (s_new_last + n*(l_static-l_dyn) + (l_static+l_dyn))) for n in n_list]
+                # OLD
+                # err = [np.abs(s - (s_new_last + n*(l_static-l_dyn) + (l_static+l_dyn))) for n in n_list]
+                # UPDATED
+                err = [np.abs(s - (s_new_last + (n + 1) * (l_static - l_dyn))) for n in n_list]
                 n_best = n_list[np.argmin(err)]
             # Compute the current connector arc_length, and the accumulated number of frusta.
-            s_new_last = s_new_last + n_best*(l_static-l_dyn) + (l_static+l_dyn)
+            # OLD
+            # s_new_last = s_new_last + n_best*(l_static-l_dyn) + (l_static+l_dyn)
+            # UPDATED
+            s_new_last = s_new_last + (n_best + 1) * (l_static - l_dyn)
             n_acc_last = n_acc_last + n_best + 1
             # Add the current connector data to the lists.
             s_new.append(s_new_last)
             n_new.append(n_best)
             n_acc.append(n_acc_last)
+
         # Find new connector locations
         x_connect, y_connect, r_connect, theta_connect = \
             integral_curve_arc_length_locations(alpha_func, s_new, ri, rf, args)
@@ -403,6 +459,7 @@ def place_connectors(alpha_func,
             connect_len, alpha_func, theta_vec, x_connect, y_connect,
             r_connect, theta_connect, args, conj_ratio)
         # Filter infeasible links
+        print(f'{link_len[0] = }')
         link_len_0 = link_len[0]
         if any(link_len_0 < min_link_len):
             short_link_idx = np.arange(len(link_len_0))[link_len_0 < min_link_len]
@@ -414,15 +471,15 @@ def place_connectors(alpha_func,
     return links, link_len, connect_left, connect_right, s_new, n_new, n_acc
 
 
-def integral_curve_arc_length_locations(alpha_func, arc_len_list, ri=DEF_MIN_RAD, rf=DEF_MAX_RAD, args=None):
+def integral_curve_arc_length_locations(alpha_func, arc_lengths, ri=DEF_MIN_RAD, rf=DEF_MAX_RAD, args=None):
     """Find locations of given arc-lengths for an integral curve.
 
     Args:
         alpha_func (callable): Function for calculating angle alpha of the
                                director given (r,theta).
         arc_len_list (list): list of arc-length values.
-        ri (float, optional): Initial radius. Defaults to DEF_MIN_RAD.
-        rf (float, optional): Final radius. Defaults to DEF_MAX_RAD.
+        ri (Number, optional): Initial radius. Defaults to DEF_MIN_RAD.
+        rf (Number, optional): Final radius. Defaults to DEF_MAX_RAD.
         args (list or tuple, optional): Additional arguments for alpha_func.
                                         Defaults to None.
 
@@ -436,22 +493,35 @@ def integral_curve_arc_length_locations(alpha_func, arc_len_list, ri=DEF_MIN_RAD
         np.ndarray: Vector of theta coordinates of the points corresponding the
                     input arc-lengths.
     """
-    if type(arc_len_list) is not list:
-        arc_len_list = [arc_len_list]
+    if not isinstance(arc_lengths, list):
+        arc_lengths = [arc_lengths]
+
+    arc_lengths = np.array(arc_lengths)
     # Create arc-length events
     events = [lambda r, y, *args, arc_len=arc_len: (
-            arc_len_event(r, y, *args, arc_len=arc_len)) for arc_len in arc_len_list]
+            arc_len_event(r, y, *args, arc_len=arc_len))
+              for arc_len in arc_lengths[~np.isnan(np.array(arc_lengths))]]
     # Compute integral curves and intersections
     sol = integral_curve(alpha_func, ri, rf, [0, 0, 0], num_eval_points,
                          args=args, events=events)
     # Extract event solution
     _, _, r_events, y_events = sol
-    xy_loc, _, r_loc, theta_loc = events2points(r_events, y_events)
-    x_loc, y_loc = xy_loc
-    return x_loc, y_loc, r_loc, theta_loc
+    x_loc, y_loc, _, r_loc, theta_loc = events2points(r_events, y_events)
+
+    x_loc_tot = np.ones_like(arc_lengths) * np.nan
+    y_loc_tot = np.ones_like(arc_lengths) * np.nan
+    r_loc_tot = np.ones_like(arc_lengths) * np.nan
+    theta_loc_tot = np.ones_like(arc_lengths) * np.nan
+
+    x_loc_tot[~np.isnan(arc_lengths)] = x_loc.squeeze()
+    y_loc_tot[~np.isnan(arc_lengths)] = y_loc.squeeze()
+    r_loc_tot[~np.isnan(arc_lengths)] = r_loc.squeeze()
+    theta_loc_tot[~np.isnan(arc_lengths)] = theta_loc.squeeze()
+
+    return x_loc_tot, y_loc_tot, r_loc_tot, theta_loc_tot
 
 
-def compute_links(connect_len: float,
+def compute_links(connect_len: Number,
                   alpha_func,
                   theta_vec: np.ndarray,
                   intersect_x: np.ndarray,
@@ -463,7 +533,7 @@ def compute_links(connect_len: float,
     """Compute links between straws.
 
     Args:
-        connect_len (float): Straw connector length.
+        connect_len (Number): Straw connector length.
         alpha_func (callable): Function for calculating angle alpha of the
             director given (r,theta)
         theta_vec (np.ndarray): Vector of starting angles of straws
@@ -580,7 +650,7 @@ def draw_links(connect_left: np.ndarray,
 
 
 def draw_curve_rotations(curve_data, fig=None, ax=None,
-                         color=None, marker=None, linestyle=None):
+                         **kwargs):
     """Draw all rotations of a given curve
 
     Args:
@@ -601,13 +671,12 @@ def draw_curve_rotations(curve_data, fig=None, ax=None,
         fig, ax = plt.subplots()
         ax.axis('equal')
         plt.grid(True)
-    if color is None:
-        color = 'blue'
-    if linestyle is None:
-        linestyle = '-'
+    # if color is None:
+    #     color = 'blue'
+    # if linestyle is None:
+    #     linestyle = '-'
     for curve in curve_data:
-        ax.plot(curve[0], curve[1], color=color, marker=marker,
-                linestyle=linestyle)
+        ax.plot(curve[0], curve[1], **kwargs)
     return fig, ax
 
 
@@ -715,13 +784,14 @@ def draw_integral_curves(curve_data: np.ndarray,
         Tuple[Figure, Axes]: Resultant Figure and Axes objects.
     """
     # Draw spirals, conjugate spirals, and intersections
-    fig, ax = draw_curve_rotations(curve_data, fig=fig, ax=ax)
+    fig, ax = draw_curve_rotations(curve_data, fig=fig, ax=ax, color='blue')
     if conj_data is not None and draw_conj:
         fig, ax = draw_curve_rotations(conj_data, fig=fig, ax=ax, color='red', linestyle='--')
 
     if intersection_data is not None and draw_intersections:
         fig, ax = draw_curve_rotations(intersection_data, fig=fig, ax=ax,
-                                       color=INTERSECT_COLOR, marker='o',
+                                       color=INTERSECT_COLOR, marker='.',
+                                       markersize=10,
                                        linestyle='')
 
     return fig, ax
@@ -731,9 +801,9 @@ def alpha_const(r, theta, alpha):
     """Compute constant spiral angle
 
     Args:
-        r (float or ndarray): Radius of spiral
-        theta (float or ndarray): Angle of spiral point
-        alpha (float): Spiral angle values
+        r (Number or ndarray): Radius of spiral
+        theta (Number or ndarray): Angle of spiral point
+        alpha (Number): Spiral angle values
 
     Returns:
         ndarray: Spiral angle values
@@ -745,10 +815,10 @@ def alpha_const_curvature(r, theta, gauss_curv, deform):
     """Compute the constant Gaussian curvature spiral angle
 
     Args:
-        r (float or ndarray): radius of spiral
-        theta (float or ndarray): Angle of spiral point
-        gauss_curv (float): Gaussian curvature of deformed surface
-        deform (float): Axial deformation of directors
+        r (Number or ndarray): radius of spiral
+        theta (Number or ndarray): Angle of spiral point
+        gauss_curv (Number): Gaussian curvature of deformed surface
+        deform (Number): Axial deformation of directors
 
     Returns:
         ndarray: Spiral angle values
@@ -761,8 +831,8 @@ def const_curvature_director_params(gauss_curv, deform):
     """Calculate parameters for constant curvature spiral angle function
 
     Args:
-        gauss_curv (float): Gaussian curvature of deformed surface
-        deform (float): Axial deformation of directors
+        gauss_curv (Number): Gaussian curvature of deformed surface
+        deform (Number): Axial deformation of directors
 
     Returns:
         tuple: parameters for constant curvature spiral angle function,
@@ -774,29 +844,63 @@ def const_curvature_director_params(gauss_curv, deform):
     return c_k, c, rf_max
 
 
+def polynomial_angle(radius, theta, coeffs):
+    """Compute angle and angle derivative using a polynomial function of the radius.
+
+    Args:
+        radius: Radius values.
+        coeffs: Coefficient vector.
+
+    Returns:
+        Angle and angle derivatives with respect to the radius.
+    """
+    radius = np.array(radius) if type(radius) is not np.ndarray else radius
+    # Compute polynomial function
+    angle_poly = np.polynomial.Polynomial(coeffs)
+    return angle_poly(radius)
+
+
 if __name__ == '__main__':
     num_eval_points = 1000
     ri = DEF_MIN_RAD
-    connect_len = CONNECTOR_LENGTH
-    alpha_func = alpha_const_curvature
-    sphere_rad = 190  # mm
-    gauss_curv = 1/(sphere_rad**2)
-    # deform = 2
-    num_connections = 13  # Change this iteratively
-    min_length = MIN_LENGTH + num_connections * FRUSTUM_DEFORM
-    print(f'{min_length = } mm')
-    deform = MAX_LENGTH / min_length
+
+    # Old -
+    #   Take into account that each connection leads to an open frusta.
+    #   Compute the new minimal start length and average deformation.
+    # num_connections = 13  # Change this iteratively
+    # max_retracted_len = MIN_LENGTH + num_connections * FRUSTUM_DEFORM
+
+    # UPDATED -
+    #   Start with all frusta in retracted position and use the actual deformation
+    max_retracted_len = MIN_LENGTH + 0.5  # mm
+    deform = MAX_LENGTH / max_retracted_len
+
+    print(f'{max_retracted_len = } mm')
     print(f'Deformation = {deform}')
+    connect_len = CONNECTOR_LENGTH
+
+    alpha_func = alpha_const_curvature
+    sphere_rad = 170  # mm
+    gauss_curv = 1/(sphere_rad**2)
     args = (gauss_curv, deform)
     _, _, rf_max = const_curvature_director_params(gauss_curv, deform)
     rf = (1 - 1e-6)*rf_max
-    num_of_curves = 12
-    conj_ratio: int = 2
+    print(f'{rf_max - ri = }')
+
     # alpha_func = alpha_const
     # alpha = np.pi/2-0.1
     # args = [alpha]
     # rf = 1
+
+    alpha_func = polynomial_angle
+    # coeffs = [0, 2.5*1e-3]
+    coeffs = [0, 2.183*1e-3]
+    args = [coeffs]
+    rf = 200
+
     # num_of_curves = 3
+    num_of_curves = 12
+    conj_ratio: int = 2
 
     # Compute integral curve data
     curve_data, conj_data, intersection_data, s_events, theta_vec, \
@@ -806,33 +910,52 @@ if __name__ == '__main__':
             rf=rf,
             num_eval_points=num_eval_points,
             args=args,
+            num_of_curves=num_of_curves,
             conj_ratio=conj_ratio,
-            num_of_curves=num_of_curves)
+            max_len=max_retracted_len,
+            )
+
     # Compute links and connection points
     # links, link_len, connect_left, connect_right = compute_links(
     #     connect_len, alpha_func, theta_vec, intersect_x, intersect_y,
     #     intersect_r, intersect_theta, args, conj_ratio)
+
     links, link_len, connect_left, connect_right, s_new, n_new, n_acc = \
         place_connectors(alpha_func, theta_vec, s_events, connect_len, ri, rf,
                          args=args, conj_ratio=conj_ratio)
+
     # Save data
     save_integral_curve_data(curve_data, conj_data, intersection_data, s_events)
+
     # Draw integral curves
     fig, ax = draw_integral_curves(curve_data, conj_data, intersection_data,
                                    DRAW_CONJ, DRAW_INTERSECTIONS)
     # Draw links and connection points
-    fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
-    # Save figure to file
-    fig.savefig(str(SAVE_DIR / 'director_figure.pdf'))
+    if DRAW_LINKS:
+        fig, ax = draw_links(connect_left, connect_right, links, fig, ax, conj_ratio)
 
-    np.set_printoptions(precision=1)
-    print(f'{FRUSTUM_STATIC_LEN = }')
-    print(f'{FRUSTUM_DYNAMIC_LEN = }')
-    print(f'{s_events = }')
-    s_new = np.array(s_new)
-    print(f'{s_new = }')
-    print(f'{n_new = }')
-    print(f'{n_acc = }')
-    if np.any(link_len):
-        print(f'link lengths: {link_len[0]}')
+    if not DRAW_GRID:
+        ax.grid(False)
+
+    if not DRAW_AXES:
+        ax.axis('off')
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    if SAVE_TO_IPE:
+        # Save figure to ipe file
+        fig.savefig(str(SAVE_DIR / 'flower_connections_clean.ipe'), format="ipe")
+        # fig.savefig(str(SAVE_DIR / 'sphere_connections_clean.ipe'), format="ipe")
+
+        np.set_printoptions(precision=1)
+        print(f'{FRUSTUM_STATIC_LEN = }')
+        print(f'{FRUSTUM_DYNAMIC_LEN = }')
+        print(f'{s_events = }')
+        s_new = np.array(s_new)
+        print(f'{s_new[~np.isnan(s_new)] = }')
+        print(f'{n_new = }')
+        print(f'{n_acc = }')
+        if np.any(link_len):
+            print(f'link lengths: {link_len[0][~np.isnan(link_len[0])]}')
+
     plt.show(block=True)
