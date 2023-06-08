@@ -129,4 +129,15 @@ dmypy.json
 .pyre/
 
 # Specific files and directories
-test_note.ipynb
+# test_note.ipynb
+*.ipe
+*.pdf
+*.svg
+*.obj
+*.blend*
+*.mtl
+.ipynb
+otfried ipe-tools master matplotlib
+backend_ipe.py
+pyvista_test.py
+test_deformation.ipynb
